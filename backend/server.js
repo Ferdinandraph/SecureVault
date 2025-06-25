@@ -17,6 +17,15 @@ const allowedOrigins = [
   normalizeOrigin(process.env.CLIENT_URI), // e.g., https://secure-vault-beta.vercel.app
   normalizeOrigin(process.env.CLIENT_URI_DEV), // e.g., http://localhost:3000
 ].filter(Boolean);
+
+// Apply CORS for public routes separately
+app.use('/api/files/public', cors({
+  origin: '*', // Allow all origins for public routes
+  methods: ['GET', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
+}));
+
+// Apply CORS for authenticated routes
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -27,9 +36,9 @@ app.use(
         callback(new Error('Not allowed by CORS'));
       }
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allow necessary methods
-    allowedHeaders: ['Content-Type', 'Authorization'], // Allow necessary headers
-    credentials: true, // Support cookies/tokens
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: true,
   })
 );
 
