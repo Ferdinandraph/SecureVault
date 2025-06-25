@@ -263,7 +263,7 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
     const shareToken = crypto.randomBytes(32).toString('hex');
     const shareLink = recipient
       ? `${process.env.CLIENT_URI}/share/${file._id}/${shareToken}`
-      : `http://localhost:5173/public/share/${file._id}/${shareToken}`;
+      : `${process.env.CLIENT_URI}/public/share/${file._id}/${shareToken}`;
 
     const shareEntry = {
       userId: recipient ? recipient._id : null,
