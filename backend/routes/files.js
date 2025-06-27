@@ -119,9 +119,37 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
       sharedWith: [],
     });
 
-    await file.save();
-    console.log('File saved:', { fileId: file._id, gridfsFileId });
-    res.status(200).json({ message: 'File uploaded successfully.', fileId: file._id });
+    try {
+      const savedFile = await file.save();
+      console.log('File saved to MongoDB:', {
+        fileId: savedFile._id,
+        gridfsFileId,
+        filename: savedFile.filename,
+        userId: savedFile.userId,
+        size: savedFile.size,
+      });
+      res.status(200).json({ message: 'File uploaded successfully.', fileId: savedFile._id });
+    } catch (saveError) {
+      console.error('File save error:', {
+        message: saveError.message,
+        stack: saveError.stack,
+        code: saveError.code,
+        fileData: {
+          filename: req.file.originalname,
+          userId: req.user.id,
+          gridfsFileId,
+        },
+      });
+      // Clean up GridFS file if metadata save fails
+      await gfs.delete(gridfsFileId).catch((deleteError) => {
+        console.error('GridFS cleanup error:', {
+          message: deleteError.message,
+          stack: deleteError.stack,
+          gridfsFileId,
+        });
+      });
+      return res.status(500).json({ message: 'Failed to save file metadata.', error: saveError.message });
+    }
   } catch (error) {
     console.error('Upload error:', {
       message: error.message,
