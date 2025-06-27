@@ -1,17 +1,17 @@
 const mongoose = require('mongoose');
 
 const shareSchema = new mongoose.Schema({
-  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-  email: { type: String },
+  userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  email: { type: String, default: null },
   encryptedKey: { type: String, required: true },
   salt: { type: String, required: true },
   iv: { type: String, required: true },
-  publicToken: { type: String },
+  publicToken: { type: String, default: null },
 });
 
 const fileSchema = new mongoose.Schema({
   filename: { type: String, required: true },
-  path: { type: String, required: true },
+  gridfsFileId: { type: mongoose.Schema.Types.ObjectId, required: true }, // Replaced path
   size: { type: Number, required: true },
   userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   encryptionKey: { type: String, required: true },

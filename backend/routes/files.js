@@ -179,6 +179,10 @@ router.get('/download/:fileId', authMiddleware, async (req, res) => {
       console.log('Unauthorized access:', { fileId: req.params.fileId, userId: req.user.id });
       return res.status(403).json({ message: 'Unauthorized access.' });
     }
+    if (!file.gridfsFileId) {
+      console.log('Missing gridfsFileId:', { fileId: req.params.fileId });
+      return res.status(400).json({ message: 'File storage ID missing.' });
+    }
     const downloadStream = gfs.openDownloadStream(file.gridfsFileId);
     let fileData = [];
     downloadStream.on('data', (chunk) => fileData.push(chunk));
@@ -243,9 +247,14 @@ router.delete('/delete/:fileId', authMiddleware, async (req, res) => {
       console.log('Unauthorized access:', { fileId: req.params.fileId, userId: req.user.id });
       return res.status(403).json({ message: 'Unauthorized access.' });
     }
-    await gfs.delete(file.gridfsFileId);
+    if (!file.gridfsFileId) {
+      console.log('Missing gridfsFileId, removing metadata only:', { fileId: req.params.fileId });
+    } else {
+      await gfs.delete(file.gridfsFileId);
+      console.log('File removed from GridFS:', { fileId: req.params.fileId, gridfsFileId: file.gridfsFileId });
+    }
     await File.deleteOne({ _id: req.params.fileId });
-    console.log('File deleted:', { fileId: req.params.fileId, gridfsFileId: file.gridfsFileId });
+    console.log('File metadata deleted:', { fileId: req.params.fileId });
     res.status(200).json({ message: 'File deleted successfully.' });
   } catch (error) {
     console.error('Delete error:', {
@@ -464,6 +473,10 @@ router.get('/public/download/:fileId/:token', async (req, res) => {
     if (!shareEntry) {
       console.log('Invalid share token:', { fileId: req.params.fileId, token: req.params.token });
       return res.status(404).json({ message: 'Invalid share link.' });
+    }
+    if (!file.gridfsFileId) {
+      console.log('Missing gridfsFileId:', { fileId: req.params.fileId });
+      return res.status(400).json({ message: 'File storage ID missing.' });
     }
     const downloadStream = gfs.openDownloadStream(file.gridfsFileId);
     let fileData = [];
