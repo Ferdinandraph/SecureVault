@@ -321,10 +321,11 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
       console.log('Share failed: Invalid file ID', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'Invalid file ID.' });
     }
-    if (!decryptionKey) {
-      console.log('Share failed: Decryption key required', { fileId: req.params.fileId });
-      return res.status(400).json({ message: 'Decryption key required.' });
+    if (!decryptionKey || typeof decryptionKey !== 'string' || decryptionKey.length < 8) {
+      console.log('Share failed: Invalid decryption key', { fileId: req.params.fileId, decryptionKeyLength: decryptionKey?.length });
+      return res.status(400).json({ message: 'Decryption key must be a string of at least 8 characters.' });
     }
+
     const file = await File.findById(req.params.fileId);
     if (!file) {
       console.log('Share failed: File not found', { fileId: req.params.fileId });
@@ -346,29 +347,37 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
     let aesKeyBuffer;
     try {
       aesKeyBuffer = Buffer.from(file.encryptionKey, 'base64');
+      console.log('AES key decoded', { fileId: file._id, aesKeyLength: aesKeyBuffer.length });
+      if (aesKeyBuffer.length !== 32) {
+        console.log('Invalid AES key size', { fileId: file._id, length: aesKeyBuffer.length });
+        return res.status(400).json({ message: `Invalid AES key size: expected 32 bytes, got ${aesKeyBuffer.length}.` });
+      }
     } catch (e) {
       console.log('Invalid base64 encoding for encryptionKey', { fileId: file._id, error: e.message });
       return res.status(400).json({ message: 'Invalid encryption key encoding in file.' });
     }
-    if (aesKeyBuffer.length !== 32) {
-      console.log('Invalid AES key size', { fileId: file._id, length: aesKeyBuffer.length });
-      return res.status(400).json({ message: `Invalid AES key size: expected 32 bytes, got ${aesKeyBuffer.length}.` });
-    }
 
     const salt = crypto.randomBytes(16);
     const iv = crypto.randomBytes(12);
-    const passwordKey = await crypto.subtle.deriveKey(
-      {
-        name: 'PBKDF2',
-        salt,
-        iterations: 100000,
-        hash: 'SHA-256',
-      },
-      await crypto.subtle.importKey('raw', Buffer.from(decryptionKey, 'utf8'), 'PBKDF2', false, ['deriveKey']),
-      { name: 'AES-GCM', length: 256 },
-      false,
-      ['encrypt']
-    );
+    let passwordKey;
+    try {
+      passwordKey = await crypto.subtle.deriveKey(
+        {
+          name: 'PBKDF2',
+          salt,
+          iterations: 100000,
+          hash: 'SHA-256',
+        },
+        await crypto.subtle.importKey('raw', Buffer.from(decryptionKey, 'utf8'), 'PBKDF2', false, ['deriveKey']),
+        { name: 'AES-GCM', length: 256 },
+        false,
+        ['encrypt']
+      );
+      console.log('Password key derived', { fileId: file._id, decryptionKeyLength: decryptionKey.length });
+    } catch (e) {
+      console.error('Failed to derive password key', { fileId: file._id, error: e.message });
+      return res.status(400).json({ message: `Failed to derive password key: ${e.message}` });
+    }
 
     let encryptedKey;
     try {
@@ -377,8 +386,9 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
         passwordKey,
         aesKeyBuffer
       );
+      console.log('Encrypted key generated', { fileId: file._id, encryptedKeyLength: Buffer.from(encryptedKey).length });
     } catch (e) {
-      console.error('Encryption failed:', { error: e.message, cause: e.cause?.message });
+      console.error('Encryption failed:', { fileId: file._id, error: e.message });
       return res.status(400).json({ message: `Encryption failed: ${e.message}` });
     }
 
@@ -396,7 +406,6 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
       iv: iv.toString('base64'),
       publicToken: recipient ? null : shareToken,
     };
-
     file.sharedWith.push(shareEntry);
     file.shareLink = shareLink;
     file.shareToken = shareToken;
@@ -407,16 +416,23 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
         from: process.env.EMAIL_USER,
         to: recipientEmail,
         subject: `Shared File: ${file.filename}`,
-        text: `You have received a shared file: ${file.filename}\n\nAccess it here: ${shareLink}\n\nTo decrypt the file, use the decryption key provided by the sender separately.`,
+        text: `You have received a shared file: ${file.filename}\n\nAccess it here: ${shareLink}\n\nDecryption key (share separately): ${decryptionKey}`,
       });
+      console.log('Email sent', { recipientEmail, fileId: file._id, shareLink });
     }
 
-    console.log('File shared:', { fileId: file._id, shareLink, recipientEmail });
-    res.status(200).json({ shareLink });
+    console.log('File shared successfully', {
+      fileId: file._id,
+      shareLink,
+      recipientEmail,
+      encryptedKeyLength: shareEntry.encryptedKey.length,
+      saltLength: shareEntry.salt.length,
+      ivLength: shareEntry.iv.length,
+    });
+    res.status(200).json({ shareLink, decryptionKey });
   } catch (error) {
     console.error('Share error:', {
       message: error.message,
-      cause: error.cause?.message,
       stack: error.stack,
       fileId: req.params.fileId,
     });

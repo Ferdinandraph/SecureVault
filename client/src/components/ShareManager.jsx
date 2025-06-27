@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { FileText, Trash2, Download, Share2, Link } from 'lucide-react';
 import { useToast } from './Toast';
 import axios from 'axios';
+import FileSaver from 'file-saver';
 
 // Debounce utility to prevent rapid clicks
 const debounce = (func, wait) => {
@@ -22,7 +23,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
   const [receivedFiles, setReceivedFiles] = useState([]);
   const [userFiles, setUserFiles] = useState([]);
   const [isValidating, setIsValidating] = useState(false);
-  const [retryCount, setRetryCount] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
   const { addToast } = useToast();
 
@@ -31,7 +31,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     fetchFiles();
   }, [initialFile]);
 
-  const fetchFiles = async (isRetry = false) => {
+  const fetchFiles = async () => {
     try {
       const token = localStorage.getItem('token');
       if (!token) {
@@ -39,7 +39,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         addToast({ title: 'Authentication Error', description: 'Please log in again.', type: 'error', clearPrevious: true });
         return;
       }
-      console.log('Fetching files:', { userId: localStorage.getItem('userId'), attempt: retryCount + 1 });
+      console.log('Fetching files:', { userId: localStorage.getItem('userId') });
       const response = await axios.get(`${import.meta.env.VITE_BACKEND_URI}/api/files/list`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -48,7 +48,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
       setUserFiles(files.filter((file) => file.userId.toString() === localStorage.getItem('userId')));
       setSharedFiles(files.filter((file) => file.sharedWith.length > 0));
       setReceivedFiles(files.filter((file) => file.sharedWith.some((share) => share.userId?.toString() === localStorage.getItem('userId'))));
-      setRetryCount(0);
     } catch (error) {
       console.error('Fetch files error:', {
         message: error.message,
@@ -62,15 +61,11 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         type: 'error',
         clearPrevious: true,
       });
-      if (!isRetry && retryCount < 2 && error.response?.status !== 400 && error.response?.status !== 401) {
-        setRetryCount(retryCount + 1);
-        addToast({
-          title: 'Retrying Fetch',
-          description: `Retrying file fetch (Attempt ${retryCount + 2}/3).`,
-          type: 'info',
-          clearPrevious: true,
-        });
-        setTimeout(() => fetchFiles(true), 2000);
+      if (error.response?.status === 401) {
+        localStorage.removeItem('token');
+        localStorage.removeItem('userId');
+        localStorage.removeItem('userEmail');
+        window.location.href = '/login';
       }
     }
   };
@@ -192,8 +187,14 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           passwordKey,
           encryptedKeyBuffer
         );
+        console.log('AES key decrypted', { fileId: filename._id, aesKeyLength: new Uint8Array(aesKeyData).length });
       } catch (e) {
         throw new Error(`Failed to decrypt AES key: ${e.message || 'Invalid decryption key or corrupted encrypted key.'}`);
+      }
+
+      // Validate AES key length
+      if (new Uint8Array(aesKeyData).length !== 32) {
+        throw new Error(`Invalid AES key length: expected 32 bytes, got ${new Uint8Array(aesKeyData).length}`);
       }
 
       // Import crypto key
@@ -254,7 +255,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         decryptionKeyLength: decryptionKey?.length,
         encryptedDataSize: encryptedData instanceof Blob ? encryptedData.size : encryptedData?.byteLength,
       });
-      throw new Error(`Decryption failed: ${error.message}`);
+      throw error;
     }
   };
 
@@ -273,8 +274,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     try {
       const inputDecryptionKey = prompt('Enter the decryption key provided by the sender:');
       if (!inputDecryptionKey) {
-        addToast({ title: 'Error', description: 'Decryption key is required.', type: 'error', clearPrevious: true });
-        return;
+        throw new Error('Decryption key is required.');
       }
       console.log('downloadReceivedFile inputs:', {
         fileId,
@@ -282,8 +282,10 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         encryptedKey: encryptedKey?.slice(0, 10) + '...',
         salt: salt?.slice(0, 10) + '...',
         iv: iv?.slice(0, 10) + '...',
+        fileIv: iv?.slice(0, 10) + '...',
         decryptionKey: inputDecryptionKey?.slice(0, 10) + '...',
       });
+
       const token = localStorage.getItem('token');
       if (!token) {
         throw new Error('Authentication token missing');
@@ -296,19 +298,20 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
       if (!(response.data instanceof Blob)) {
         throw new Error('Invalid response data: Expected Blob');
       }
-      const decryptedBlob = await decryptFile(response.data, encryptedKey, salt, iv, { filename, iv, _id: fileId }, inputDecryptionKey);
-      const url = window.URL.createObjectURL(decryptedBlob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
+
+      const decryptedBlob = await decryptFile(
+        response.data,
+        encryptedKey,
+        salt,
+        iv,
+        { filename, iv, _id: fileId },
+        inputDecryptionKey
+      );
+      FileSaver.saveAs(decryptedBlob, filename);
       console.log('Received file downloaded:', { fileId, filename });
       addToast({
-        title: 'Download Started',
-        description: `Downloading ${filename}.`,
+        title: 'Download Successful',
+        description: `Downloaded ${filename}.`,
         type: 'success',
         clearPrevious: true,
       });
@@ -322,8 +325,10 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         status: error.response?.status,
         responseData: error.response?.data,
       });
-      let errorMessage = error.message || 'Failed to download or decrypt file. Check the decryption key.';
-      if (error.response?.data?.message?.includes('failed to get stat')) {
+      let errorMessage = error.message || 'Failed to download or decrypt file. Check the decryption key or file integrity.';
+      if (error.message.includes('Invalid key, IV, or corrupted file data')) {
+        errorMessage = 'Decryption failed: Incorrect decryption key or corrupted encryption parameters.';
+      } else if (error.message.includes('failed to get stat')) {
         errorMessage = 'File data is unavailable or corrupted. Contact the file owner.';
       }
       addToast({
@@ -344,9 +349,9 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     } finally {
       setIsDownloading(false);
     }
-  }, 500), []);
+  }, 500), [isDownloading, addToast]);
 
-  const handleShare = async (retry = false) => {
+  const handleShare = async () => {
     if (!selectedFile) {
       console.error('No file selected for sharing');
       addToast({ title: 'Error', description: 'Please select a file.', type: 'error', clearPrevious: true });
@@ -394,14 +399,15 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         fileId: selectedFile._id,
         shareLink: response.data.shareLink,
         recipientEmail,
-        decryptionKey: decryptionKey.slice(0, 4) + '...',
+        decryptionKey,
       });
       if (recipientEmail) {
         setShareLink(response.data.shareLink);
+        setDecryptionKey(decryptionKey);
       } else {
         setPublicShareLink(response.data.shareLink);
+        setDecryptionKey(decryptionKey);
       }
-      setDecryptionKey(decryptionKey);
       addToast({
         title: 'Share Successful',
         description: recipientEmail
@@ -421,26 +427,15 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         message: error.message,
         status: error.response?.status,
       });
-      if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
-        setRetryCount(retryCount + 1);
-        addToast({
-          title: 'Retrying Share',
-          description: `Retrying share for ${selectedFile.filename} (Attempt ${retryCount + 2}/3).`,
-          type: 'info',
-          clearPrevious: true,
-        });
-        setTimeout(() => handleShare(true), 2000);
-      } else {
-        addToast({
-          title: 'Share Failed',
-          description: error.response?.data?.message || `Failed to share ${selectedFile.filename}.`,
-          type: 'error',
-          clearPrevious: true,
-        });
-        if (error.response?.status === 404) {
-          setSelectedFile(null);
-          fetchFiles();
-        }
+      addToast({
+        title: 'Share Failed',
+        description: error.response?.data?.message || `Failed to share ${selectedFile.filename}.`,
+        type: 'error',
+        clearPrevious: true,
+      });
+      if (error.response?.status === 404) {
+        setSelectedFile(null);
+        fetchFiles();
       }
     } finally {
       setIsValidating(false);
@@ -455,7 +450,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     }
   };
 
-  const handleRevoke = async (fileId, recipientId, publicToken, retry = false) => {
+  const handleRevoke = async (fileId, recipientId, publicToken) => {
     try {
       const token = localStorage.getItem('token');
       console.log('Revoking access:', { fileId, recipientId, publicToken });
@@ -473,26 +468,16 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         message: error.message,
         status: error.response?.status,
       });
-      if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
-        addToast({
-          title: 'Retrying Revoke',
-          description: `Retrying revoke for file ${fileId} (Attempt 2/2).`,
-          type: 'info',
-          clearPrevious: true,
-        });
-        setTimeout(() => handleRevoke(fileId, recipientId, publicToken, true), 2000);
-      } else {
-        addToast({
-          title: 'Revoke Failed',
-          description: error.response?.data?.message || 'Failed to revoke access.',
-          type: 'error',
-          clearPrevious: true,
-        });
-      }
+      addToast({
+        title: 'Revoke Failed',
+        description: error.response?.data?.message || 'Failed to revoke access.',
+        type: 'error',
+        clearPrevious: true,
+      });
     }
   };
 
-  const accessSharedFile = async (e, retry = false) => {
+  const accessSharedFile = async (e) => {
     e.preventDefault();
     const link = e.target.elements.shareLink.value;
     const match = link.match(/\/(share|public\/share)\/([^/]+)\/([^/]+)/);
@@ -525,22 +510,12 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         message: error.message,
         status: error.response?.status,
       });
-      if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
-        addToast({
-          title: 'Retrying Access',
-          description: `Retrying access for shared file ${fileId} (Attempt 2/2).`,
-          type: 'info',
-          clearPrevious: true,
-        });
-        setTimeout(() => accessSharedFile(e, true), 2000);
-      } else {
-        addToast({
-          title: 'Error',
-          description: error.response?.data?.message || 'Failed to access shared file. Check the link.',
-          type: 'error',
-          clearPrevious: true,
-        });
-      }
+      addToast({
+        title: 'Error',
+        description: error.response?.data?.message || 'Failed to access shared file. Check the link.',
+        type: 'error',
+        clearPrevious: true,
+      });
     }
   };
 
