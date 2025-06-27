@@ -23,7 +23,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
   const [userFiles, setUserFiles] = useState([]);
   const [isValidating, setIsValidating] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
-  const [isDownloading, setIsDownloading] = useState(false); // Prevent multiple downloads
+  const [isDownloading, setIsDownloading] = useState(false);
   const { addToast } = useToast();
 
   useEffect(() => {
@@ -36,7 +36,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
       const token = localStorage.getItem('token');
       if (!token) {
         console.error('No token found in localStorage');
-        addToast({ title: 'Authentication Error', description: 'Please log in again.', type: 'error' });
+        addToast({ title: 'Authentication Error', description: 'Please log in again.', type: 'error', clearPrevious: true });
         return;
       }
       console.log('Fetching files:', { userId: localStorage.getItem('userId'), attempt: retryCount + 1 });
@@ -60,6 +60,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         title: 'Error',
         description: errorMessage,
         type: 'error',
+        clearPrevious: true,
       });
       if (!isRetry && retryCount < 2 && error.response?.status !== 400 && error.response?.status !== 401) {
         setRetryCount(retryCount + 1);
@@ -67,6 +68,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           title: 'Retrying Fetch',
           description: `Retrying file fetch (Attempt ${retryCount + 2}/3).`,
           type: 'info',
+          clearPrevious: true,
         });
         setTimeout(() => fetchFiles(true), 2000);
       }
@@ -92,6 +94,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         title: 'Error',
         description: error.response?.data?.message || 'File validation failed.',
         type: 'error',
+        clearPrevious: true,
       });
       return false;
     }
@@ -134,41 +137,54 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
       if (!encryptedData || !encryptedKey || !salt || !iv || !filename?.filename || !filename?.iv || !decryptionKey) {
         throw new Error('Missing required decryption parameters');
       }
-      console.log('Decrypting file:', { filename: filename.filename, fileId: filename._id });
-      
+      console.log('Decrypting file:', {
+        filename: filename.filename,
+        fileId: filename._id,
+        encryptedDataSize: encryptedData instanceof Blob ? encryptedData.size : encryptedData.byteLength,
+      });
+
       // Validate base64 strings
+      let saltBuffer, ivBuffer, fileIvBuffer, encryptedKeyBuffer;
       try {
-        atob(encryptedKey);
-        atob(salt);
-        atob(iv);
-        atob(filename.iv);
+        saltBuffer = Uint8Array.from(atob(salt), (c) => c.charCodeAt(0));
+        ivBuffer = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
+        fileIvBuffer = Uint8Array.from(atob(filename.iv), (c) => c.charCodeAt(0));
+        encryptedKeyBuffer = Uint8Array.from(atob(encryptedKey), (c) => c.charCodeAt(0));
       } catch (e) {
         throw new Error(`Invalid base64 encoding: ${e.message}`);
       }
-
-      const saltBuffer = Uint8Array.from(atob(salt), (c) => c.charCodeAt(0));
-      const ivBuffer = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
-      const fileIvBuffer = Uint8Array.from(atob(filename.iv), (c) => c.charCodeAt(0));
-      const encryptedKeyBuffer = Uint8Array.from(atob(encryptedKey), (c) => c.charCodeAt(0));
 
       // Validate buffer lengths
       if (saltBuffer.length !== 16) throw new Error(`Invalid salt length: expected 16, got ${saltBuffer.length}`);
       if (ivBuffer.length !== 12) throw new Error(`Invalid IV length: expected 12, got ${ivBuffer.length}`);
       if (fileIvBuffer.length !== 12) throw new Error(`Invalid file IV length: expected 12, got ${fileIvBuffer.length}`);
+      console.log('Input buffers validated:', {
+        saltLength: saltBuffer.length,
+        ivLength: ivBuffer.length,
+        fileIvLength: fileIvBuffer.length,
+        encryptedKeyLength: encryptedKeyBuffer.length,
+      });
 
-      const passwordKey = await crypto.subtle.deriveKey(
-        {
-          name: 'PBKDF2',
-          salt: saltBuffer,
-          iterations: 100000,
-          hash: 'SHA-256',
-        },
-        await crypto.subtle.importKey('raw', new TextEncoder().encode(decryptionKey), 'PBKDF2', false, ['deriveKey']),
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['decrypt']
-      );
-      
+      // Derive password key
+      let passwordKey;
+      try {
+        passwordKey = await crypto.subtle.deriveKey(
+          {
+            name: 'PBKDF2',
+            salt: saltBuffer,
+            iterations: 100000,
+            hash: 'SHA-256',
+          },
+          await crypto.subtle.importKey('raw', new TextEncoder().encode(decryptionKey), 'PBKDF2', false, ['deriveKey']),
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['decrypt']
+        );
+      } catch (e) {
+        throw new Error(`Failed to derive password key: ${e.message}`);
+      }
+
+      // Decrypt AES key
       let aesKeyData;
       try {
         aesKeyData = await crypto.subtle.decrypt(
@@ -177,18 +193,31 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           encryptedKeyBuffer
         );
       } catch (e) {
-        throw new Error(`Failed to decrypt AES key: ${e.message}`);
+        throw new Error(`Failed to decrypt AES key: ${e.message || 'Invalid decryption key or corrupted encrypted key.'}`);
       }
 
-      const cryptoKey = await crypto.subtle.importKey(
-        'raw',
-        aesKeyData,
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['decrypt']
-      );
+      // Import crypto key
+      let cryptoKey;
+      try {
+        cryptoKey = await crypto.subtle.importKey(
+          'raw',
+          aesKeyData,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['decrypt']
+        );
+      } catch (e) {
+        throw new Error(`Failed to import crypto key: ${e.message || 'Invalid AES key data.'}`);
+      }
 
+      // Validate encrypted data
       const dataBuffer = encryptedData instanceof Blob ? await encryptedData.arrayBuffer() : encryptedData;
+      if (!dataBuffer || dataBuffer.byteLength === 0) {
+        throw new Error('Encrypted data is empty or invalid.');
+      }
+      console.log('Encrypted data validated:', { dataBufferSize: dataBuffer.byteLength });
+
+      // Decrypt file data
       let decryptedData;
       try {
         decryptedData = await crypto.subtle.decrypt(
@@ -197,7 +226,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           dataBuffer
         );
       } catch (e) {
-        throw new Error(`Failed to decrypt file data: ${e.message}`);
+        throw new Error(`Failed to decrypt file data: ${e.message || 'Invalid key, IV, or corrupted file data.'}`);
       }
 
       const extension = filename.filename.split('.').pop().toLowerCase();
@@ -223,8 +252,9 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         ivLength: iv?.length,
         fileIvLength: filename?.iv?.length,
         decryptionKeyLength: decryptionKey?.length,
+        encryptedDataSize: encryptedData instanceof Blob ? encryptedData.size : encryptedData?.byteLength,
       });
-      throw new Error(`Decryption failed: ${error.message || 'Invalid key or corrupted data.'}`);
+      throw new Error(`Decryption failed: ${error.message}`);
     }
   };
 
@@ -235,6 +265,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         title: 'Download In Progress',
         description: 'Please wait for the current download to complete.',
         type: 'info',
+        clearPrevious: true,
       });
       return;
     }
@@ -242,7 +273,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     try {
       const inputDecryptionKey = prompt('Enter the decryption key provided by the sender:');
       if (!inputDecryptionKey) {
-        addToast({ title: 'Error', description: 'Decryption key is required.', type: 'error' });
+        addToast({ title: 'Error', description: 'Decryption key is required.', type: 'error', clearPrevious: true });
         return;
       }
       console.log('downloadReceivedFile inputs:', {
@@ -279,6 +310,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         title: 'Download Started',
         description: `Downloading ${filename}.`,
         type: 'success',
+        clearPrevious: true,
       });
     } catch (error) {
       console.error('Download received file error:', {
@@ -298,24 +330,26 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         title: 'Error',
         description: errorMessage,
         type: 'error',
+        clearPrevious: true,
       });
       if (!retry && error.response?.status && error.response.status !== 400 && error.response.status !== 404 && error.response.status !== 403) {
         addToast({
           title: 'Retrying Download',
           description: `Retrying download for ${filename} (Attempt 2/2).`,
           type: 'info',
+          clearPrevious: true,
         });
         setTimeout(() => downloadReceivedFile(fileId, filename, encryptedKey, salt, iv, true), 2000);
       }
     } finally {
       setIsDownloading(false);
     }
-  }, 500), []); // Debounce for 500ms
+  }, 500), []);
 
   const handleShare = async (retry = false) => {
     if (!selectedFile) {
       console.error('No file selected for sharing');
-      addToast({ title: 'Error', description: 'Please select a file.', type: 'error' });
+      addToast({ title: 'Error', description: 'Please select a file.', type: 'error', clearPrevious: true });
       return;
     }
     console.log('Attempting to share file:', { fileId: selectedFile._id, filename: selectedFile.filename, recipientEmail });
@@ -328,6 +362,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           title: 'Error',
           description: `File ${selectedFile.filename} no longer exists.`,
           type: 'error',
+          clearPrevious: true,
         });
         setSelectedFile(null);
         fetchFiles();
@@ -342,6 +377,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
             title: 'Error',
             description: `Recipient ${recipientEmail} not registered. Use public sharing instead.`,
             type: 'error',
+            clearPrevious: true,
           });
           setIsValidating(false);
           return;
@@ -372,6 +408,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           ? `File shared with ${recipientEmail}. Share this decryption key separately: ${decryptionKey}`
           : `Public share link created. Share this link and decryption key separately: ${decryptionKey}`,
         type: 'success',
+        clearPrevious: true,
       });
       fetchFiles();
       setRecipientEmail('');
@@ -390,6 +427,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           title: 'Retrying Share',
           description: `Retrying share for ${selectedFile.filename} (Attempt ${retryCount + 2}/3).`,
           type: 'info',
+          clearPrevious: true,
         });
         setTimeout(() => handleShare(true), 2000);
       } else {
@@ -397,6 +435,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           title: 'Share Failed',
           description: error.response?.data?.message || `Failed to share ${selectedFile.filename}.`,
           type: 'error',
+          clearPrevious: true,
         });
         if (error.response?.status === 404) {
           setSelectedFile(null);
@@ -412,7 +451,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     if (link) {
       navigator.clipboard.writeText(link);
       console.log('Share link copied:', { link });
-      addToast({ title: 'Link Copied', description: 'Share link copied to clipboard.', type: 'success' });
+      addToast({ title: 'Link Copied', description: 'Share link copied to clipboard.', type: 'success', clearPrevious: true });
     }
   };
 
@@ -424,7 +463,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         headers: { Authorization: `Bearer ${token}` },
       });
       console.log('Access revoked successfully:', { fileId });
-      addToast({ title: 'Access Revoked', description: 'File access revoked successfully.', type: 'success' });
+      addToast({ title: 'Access Revoked', description: 'File access revoked successfully.', type: 'success', clearPrevious: true });
       fetchFiles();
     } catch (error) {
       console.error('Revoke error:', {
@@ -439,6 +478,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           title: 'Retrying Revoke',
           description: `Retrying revoke for file ${fileId} (Attempt 2/2).`,
           type: 'info',
+          clearPrevious: true,
         });
         setTimeout(() => handleRevoke(fileId, recipientId, publicToken, true), 2000);
       } else {
@@ -446,6 +486,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           title: 'Revoke Failed',
           description: error.response?.data?.message || 'Failed to revoke access.',
           type: 'error',
+          clearPrevious: true,
         });
       }
     }
@@ -457,7 +498,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     const match = link.match(/\/(share|public\/share)\/([^/]+)\/([^/]+)/);
     if (!match) {
       console.error('Invalid share link:', { link });
-      addToast({ title: 'Error', description: 'Invalid share link format.', type: 'error' });
+      addToast({ title: 'Error', description: 'Invalid share link format.', type: 'error', clearPrevious: true });
       return;
     }
     const [, type, fileId, token] = match;
@@ -473,7 +514,8 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
       addToast({ 
         title: 'File Accessed', 
         description: `Shared file ${response.data.filename} added to your received files.`, 
-        type: 'success' 
+        type: 'success',
+        clearPrevious: true 
       });
     } catch (error) {
       console.error('Access shared file error:', {
@@ -488,6 +530,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           title: 'Retrying Access',
           description: `Retrying access for shared file ${fileId} (Attempt 2/2).`,
           type: 'info',
+          clearPrevious: true,
         });
         setTimeout(() => accessSharedFile(e, true), 2000);
       } else {
@@ -495,6 +538,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           title: 'Error',
           description: error.response?.data?.message || 'Failed to access shared file. Check the link.',
           type: 'error',
+          clearPrevious: true,
         });
       }
     }
@@ -535,6 +579,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
                     title: 'Error',
                     description: 'Selected file no longer exists.',
                     type: 'error',
+                    clearPrevious: true,
                   });
                   fetchFiles();
                   setSelectedFile(null);

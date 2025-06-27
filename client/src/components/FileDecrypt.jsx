@@ -4,6 +4,15 @@ import { useToast } from './Toast';
 import axios from 'axios';
 import FileSaver from 'file-saver';
 
+// Debounce utility to prevent rapid clicks
+const debounce = (func, wait) => {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait);
+  };
+};
+
 const FileDecrypt = () => {
   const [file, setFile] = useState(null);
   const [decryptionKey, setDecryptionKey] = useState('');
@@ -36,37 +45,101 @@ const FileDecrypt = () => {
 
   const decryptFile = async (encryptedData, encryptedKey, salt, iv, fileIv, filename) => {
     try {
-      console.log('Decrypting file:', { filename });
-      const passwordKey = await crypto.subtle.deriveKey(
-        {
-          name: 'PBKDF2',
-          salt: Uint8Array.from(atob(salt), c => c.charCodeAt(0)),
-          iterations: 100000,
-          hash: 'SHA-256',
-        },
-        await crypto.subtle.importKey('raw', new TextEncoder().encode(decryptionKey), 'PBKDF2', false, ['deriveKey']),
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['decrypt']
-      );
-      const aesKeyData = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: Uint8Array.from(atob(iv), c => c.charCodeAt(0)) },
-        passwordKey,
-        Uint8Array.from(atob(encryptedKey), c => c.charCodeAt(0))
-      );
-      const cryptoKey = await crypto.subtle.importKey(
-        'raw',
-        aesKeyData,
-        { name: 'AES-GCM', length: 256 },
-        false,
-        ['decrypt']
-      );
+      // Validate inputs
+      if (!encryptedData || !encryptedKey || !salt || !iv || !fileIv || !filename) {
+        throw new Error('Missing required decryption parameters');
+      }
+      console.log('Decrypting file:', {
+        filename,
+        encryptedDataSize: encryptedData instanceof Blob ? encryptedData.size : encryptedData.byteLength,
+      });
+
+      // Validate base64 strings
+      let saltBuffer, ivBuffer, fileIvBuffer, encryptedKeyBuffer;
+      try {
+        saltBuffer = Uint8Array.from(atob(salt), (c) => c.charCodeAt(0));
+        ivBuffer = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
+        fileIvBuffer = Uint8Array.from(atob(fileIv), (c) => c.charCodeAt(0));
+        encryptedKeyBuffer = Uint8Array.from(atob(encryptedKey), (c) => c.charCodeAt(0));
+      } catch (e) {
+        throw new Error(`Invalid base64 encoding: ${e.message}`);
+      }
+
+      // Validate buffer lengths
+      if (saltBuffer.length !== 16) throw new Error(`Invalid salt length: expected 16, got ${saltBuffer.length}`);
+      if (ivBuffer.length !== 12) throw new Error(`Invalid IV length: expected 12, got ${ivBuffer.length}`);
+      if (fileIvBuffer.length !== 12) throw new Error(`Invalid file IV length: expected 12, got ${fileIvBuffer.length}`);
+      console.log('Input buffers validated:', {
+        saltLength: saltBuffer.length,
+        ivLength: ivBuffer.length,
+        fileIvLength: fileIvBuffer.length,
+        encryptedKeyLength: encryptedKeyBuffer.length,
+      });
+
+      // Derive password key
+      let passwordKey;
+      try {
+        passwordKey = await crypto.subtle.deriveKey(
+          {
+            name: 'PBKDF2',
+            salt: saltBuffer,
+            iterations: 100000,
+            hash: 'SHA-256',
+          },
+          await crypto.subtle.importKey('raw', new TextEncoder().encode(decryptionKey), 'PBKDF2', false, ['deriveKey']),
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['decrypt']
+        );
+      } catch (e) {
+        throw new Error(`Failed to derive password key: ${e.message}`);
+      }
+
+      // Decrypt AES key
+      let aesKeyData;
+      try {
+        aesKeyData = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: ivBuffer },
+          passwordKey,
+          encryptedKeyBuffer
+        );
+      } catch (e) {
+        throw new Error(`Failed to decrypt AES key: ${e.message || 'Invalid decryption key or corrupted encrypted key.'}`);
+      }
+
+      // Import crypto key
+      let cryptoKey;
+      try {
+        cryptoKey = await crypto.subtle.importKey(
+          'raw',
+          aesKeyData,
+          { name: 'AES-GCM', length: 256 },
+          false,
+          ['decrypt']
+        );
+      } catch (e) {
+        throw new Error(`Failed to import crypto key: ${e.message || 'Invalid AES key data.'}`);
+      }
+
+      // Validate encrypted data
       const dataBuffer = encryptedData instanceof Blob ? await encryptedData.arrayBuffer() : encryptedData;
-      const decryptedData = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: Uint8Array.from(atob(fileIv), c => c.charCodeAt(0)) },
-        cryptoKey,
-        dataBuffer
-      );
+      if (!dataBuffer || dataBuffer.byteLength === 0) {
+        throw new Error('Encrypted data is empty or invalid.');
+      }
+      console.log('Encrypted data validated:', { dataBufferSize: dataBuffer.byteLength });
+
+      // Decrypt file data
+      let decryptedData;
+      try {
+        decryptedData = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: fileIvBuffer },
+          cryptoKey,
+          dataBuffer
+        );
+      } catch (e) {
+        throw new Error(`Failed to decrypt file data: ${e.message || 'Invalid key, IV, or corrupted file data.'}`);
+      }
+
       const extension = filename.split('.').pop().toLowerCase();
       const mimeTypes = {
         pdf: 'application/pdf',
@@ -79,14 +152,30 @@ const FileDecrypt = () => {
       console.log('File decrypted successfully:', { filename });
       return new Blob([decryptedData], { type: mimeType });
     } catch (error) {
-      console.error('Decrypt file error:', { filename, message: error.message });
-      throw new Error('Decryption failed: Invalid key or corrupted data.');
+      console.error('Decrypt file error:', {
+        filename,
+        message: error.message,
+        name: error.name,
+        stack: error.stack,
+        encryptedKeyLength: encryptedKey?.length,
+        saltLength: salt?.length,
+        ivLength: iv?.length,
+        fileIvLength: fileIv?.length,
+        decryptionKeyLength: decryptionKey?.length,
+        encryptedDataSize: encryptedData instanceof Blob ? encryptedData.size : encryptedData?.byteLength,
+      });
+      throw new Error(`Decryption failed: ${error.message}`);
     }
   };
 
-  const handleDecrypt = async () => {
+  const handleDecrypt = useCallback(debounce(async () => {
     if (!file || !decryptionKey) {
-      addToast({ title: 'Error', message: 'Please select a file and enter a decryption key.', type: 'error' });
+      addToast({
+        title: 'Error',
+        message: 'Please select a file and enter a decryption key.',
+        type: 'error',
+        clearPrevious: true,
+      });
       return;
     }
 
@@ -97,30 +186,55 @@ const FileDecrypt = () => {
 
       const token = localStorage.getItem('token');
       if (token) {
+        console.log('Fetching file info:', { fileId });
         const response = await axios.get(`${import.meta.env.VITE_BACKEND_URI}/api/files/list`, {
           headers: { Authorization: `Bearer ${token}` },
         });
         fileInfo = response.data.find((f) => f._id === fileId);
-        if (!fileInfo) throw new Error('File not found on server.');
+        if (!fileInfo) {
+          throw new Error('File not found on server.');
+        }
 
         const userId = localStorage.getItem('userId');
         shareInfo = fileInfo.sharedWith.find(
           (share) => share.userId?.toString() === userId || share.publicToken
         );
-        if (!shareInfo && fileInfo.userId !== userId) throw new Error('Unauthorized access.');
+        if (!shareInfo && fileInfo.userId !== userId) {
+          throw new Error('Unauthorized access.');
+        }
 
         encryptedKey = shareInfo ? shareInfo.encryptedKey : fileInfo.encryptedKey;
         salt = shareInfo ? shareInfo.salt : null;
         iv = shareInfo ? shareInfo.iv : null;
+        console.log('File info retrieved:', {
+          fileId,
+          filename: fileInfo.filename,
+          hasShareInfo: !!shareInfo,
+          encryptedKey: encryptedKey?.slice(0, 10) + '...',
+          salt: salt?.slice(0, 10) + '...',
+          iv: iv?.slice(0, 10) + '...',
+          fileIv: fileInfo.iv?.slice(0, 10) + '...',
+        });
       } else {
-        // Public share (assume file was downloaded with public link)
-        fileInfo = { iv: prompt('Enter the file IV (base64) provided with the share:'), filename: file.name.replace(`${fileId}_`, '') };
+        // Public share
+        fileInfo = {
+          iv: prompt('Enter the file IV (base64) provided with the share:'),
+          filename: file.name.replace(`${fileId}_`, ''),
+        };
         encryptedKey = prompt('Enter the encrypted key (base64) provided with the share:');
         salt = prompt('Enter the salt (base64) provided with the share:');
         iv = prompt('Enter the IV (base64) for the encrypted key:');
         if (!fileInfo.iv || !encryptedKey || !salt || !iv) {
           throw new Error('Missing required decryption parameters.');
         }
+        console.log('Public share inputs:', {
+          filename: fileInfo.filename,
+          fileId,
+          encryptedKey: encryptedKey.slice(0, 10) + '...',
+          salt: salt.slice(0, 10) + '...',
+          iv: iv.slice(0, 10) + '...',
+          fileIv: fileInfo.iv.slice(0, 10) + '...',
+        });
       }
 
       const decryptedBlob = await decryptFile(
@@ -138,19 +252,27 @@ const FileDecrypt = () => {
         title: 'Decryption Successful',
         message: `${fileInfo.filename} has been decrypted and downloaded.`,
         type: 'success',
+        clearPrevious: true,
       });
       setFile(null);
       setDecryptionKey('');
     } catch (error) {
-      console.error('Decryption error:', error);
+      console.error('Decryption error:', {
+        fileId: file?.name?.split('_')[0],
+        filename: file?.name,
+        message: error.message,
+        name: error.name,
+        stack: error.stack,
+      });
       setStatus('failed');
       addToast({
         title: 'Decryption Failed',
-        message: error.message || 'Failed to decrypt file.',
+        message: error.message || 'Failed to decrypt file. Check the decryption key or file integrity.',
         type: 'error',
+        clearPrevious: true,
       });
     }
-  };
+  }, 500), [file, decryptionKey]);
 
   const formatFileSize = (bytes) => {
     if (bytes === 0) return '0 Bytes';
