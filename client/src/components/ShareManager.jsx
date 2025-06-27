@@ -44,7 +44,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         message: error.message,
         status: error.response?.status,
         response: error.response?.data,
-        userId: localStorage.getItem('userId'),
       });
       const errorMessage = error.response?.data?.message || 'Failed to fetch files. Please try again.';
       addToast({
@@ -78,7 +77,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         fileId,
         message: error.message,
         status: error.response?.status,
-        response: error.response?.data,
       });
       addToast({
         title: 'Error',
@@ -105,7 +103,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         email,
         message: error.message,
         status: error.response?.status,
-        response: error.response?.data,
       });
       return false;
     }
@@ -247,8 +244,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         filename: selectedFile.filename,
         message: error.message,
         status: error.response?.status,
-        response: error.response?.data,
-        retryCount,
       });
       if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
         setRetryCount(retryCount + 1);
@@ -299,7 +294,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         publicToken,
         message: error.message,
         status: error.response?.status,
-        response: error.response?.data,
       });
       if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
         addToast({
@@ -352,7 +346,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         filename,
         message: error.message,
         status: error.response?.status,
-        response: error.response?.data,
       });
       if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
         addToast({
@@ -402,7 +395,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         token,
         message: error.message,
         status: error.response?.status,
-        response: error.response?.data,
       });
       if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
         addToast({

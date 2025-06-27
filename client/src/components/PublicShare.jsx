@@ -36,7 +36,6 @@ const PublicShare = () => {
         token,
         message: error.message,
         status: error.response?.status,
-        response: error.response?.data,
       });
       const errorMessage = error.response?.data?.message || 'Failed to fetch file information. Please check the link.';
       setError(errorMessage);
@@ -59,13 +58,13 @@ const PublicShare = () => {
     }
   };
 
-  const decryptFile = async (encryptedData, encryptedKey, iv, filename, decryptionKey) => {
+  const decryptFile = async (encryptedData, encryptedKey, salt, iv, filename, decryptionKey) => {
     try {
       console.log('Decrypting file:', { filename, fileId });
       const passwordKey = await crypto.subtle.deriveKey(
         {
           name: 'PBKDF2',
-          salt: Uint8Array.from(atob(fileInfo.salt), (c) => c.charCodeAt(0)),
+          salt: Uint8Array.from(atob(salt), (c) => c.charCodeAt(0)),
           iterations: 100000,
           hash: 'SHA-256',
         },
@@ -86,7 +85,7 @@ const PublicShare = () => {
         false,
         ['decrypt']
       );
-      const fileIv = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
+      const fileIv = Uint8Array.from(atob(fileInfo.iv), (c) => c.charCodeAt(0));
       const dataBuffer = encryptedData instanceof Blob ? await encryptedData.arrayBuffer() : encryptedData;
       const decryptedData = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: fileIv },
@@ -128,6 +127,7 @@ const PublicShare = () => {
       const decryptedBlob = await decryptFile(
         response.data,
         userShare.encryptedKey,
+        userShare.salt,
         userShare.iv,
         fileInfo.filename,
         decryptionKey
@@ -152,7 +152,6 @@ const PublicShare = () => {
         filename: fileInfo?.filename,
         message: error.message,
         status: error.response?.status,
-        response: error.response?.data,
       });
       addToast({
         title: 'Download Failed',

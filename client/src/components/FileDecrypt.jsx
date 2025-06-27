@@ -36,6 +36,7 @@ const FileDecrypt = () => {
 
   const decryptFile = async (encryptedData, encryptedKey, salt, iv, fileIv, filename) => {
     try {
+      console.log('Decrypting file:', { filename });
       const passwordKey = await crypto.subtle.deriveKey(
         {
           name: 'PBKDF2',
@@ -75,9 +76,11 @@ const FileDecrypt = () => {
         docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       };
       const mimeType = mimeTypes[extension] || 'application/octet-stream';
+      console.log('File decrypted successfully:', { filename });
       return new Blob([decryptedData], { type: mimeType });
     } catch (error) {
-      throw new Error('Decryption failed: ' + error.message);
+      console.error('Decrypt file error:', { filename, message: error.message });
+      throw new Error('Decryption failed: Invalid key or corrupted data.');
     }
   };
 
@@ -115,6 +118,9 @@ const FileDecrypt = () => {
         encryptedKey = prompt('Enter the encrypted key (base64) provided with the share:');
         salt = prompt('Enter the salt (base64) provided with the share:');
         iv = prompt('Enter the IV (base64) for the encrypted key:');
+        if (!fileInfo.iv || !encryptedKey || !salt || !iv) {
+          throw new Error('Missing required decryption parameters.');
+        }
       }
 
       const decryptedBlob = await decryptFile(
