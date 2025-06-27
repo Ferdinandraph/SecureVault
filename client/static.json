@@ -1,5 +1,5 @@
 {
-  "root": "build",
+  "root": "dist",
   "clean_urls": true,
   "routes": {
     "/public/share/:fileId/:token": "index.html",
