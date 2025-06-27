@@ -10,7 +10,10 @@ const FileUpload = () => {
   const { addToast } = useToast();
 
   const getFileType = (filename) => {
-    if (!filename || typeof filename !== 'string') return 'document';
+    if (!filename || typeof filename !== 'string') {
+      console.error('Invalid filename:', { filename });
+      return 'document';
+    }
     const ext = filename.split('.').pop()?.toLowerCase() || '';
     const types = {
       jpg: 'image',
@@ -25,7 +28,9 @@ const FileUpload = () => {
       doc: 'document',
       docx: 'document',
     };
-    return types[ext] || 'document';
+    const fileType = types[ext] || 'document';
+    console.log('Determined file type:', { filename, fileType });
+    return fileType;
   };
 
   const handleDragOver = useCallback((e) => {
@@ -42,12 +47,14 @@ const FileUpload = () => {
     e.preventDefault();
     setIsDragOver(false);
     const droppedFiles = Array.from(e.dataTransfer.files);
+    console.log('Files dropped:', { count: droppedFiles.length, files: droppedFiles.map(f => f.name) });
     processFiles(droppedFiles);
   }, []);
 
   const handleFileSelect = (e) => {
     if (e.target.files) {
       const selectedFiles = Array.from(e.target.files);
+      console.log('Files selected:', { count: selectedFiles.length, files: selectedFiles.map(f => f.name) });
       processFiles(selectedFiles);
     }
   };
@@ -56,6 +63,7 @@ const FileUpload = () => {
     const token = localStorage.getItem('token');
     const userEmail = localStorage.getItem('userEmail');
     if (!token || !userEmail) {
+      console.error('Authentication error:', { token: !!token, userEmail: !!userEmail });
       addToast({ title: 'Authentication Error', description: 'Please log in again.', type: 'error' });
       return;
     }
@@ -67,6 +75,7 @@ const FileUpload = () => {
       retryCount: 0,
     }));
 
+    console.log('Processing files:', { count: newFiles.length, files: newFiles.map(f => f.file.name) });
     setFiles((prev) => [...prev, ...newFiles]);
     for (const fileItem of newFiles) {
       await encryptAndUpload(fileItem, userEmail);
@@ -79,7 +88,6 @@ const FileUpload = () => {
     );
 
     try {
-      // Encrypt file
       console.log('Encrypting file:', { filename: fileItem.file.name, size: fileItem.file.size });
       const { encrypted, key, encryptedKey, iv } = await encryptFile(fileItem.file, userEmail);
       const fileType = getFileType(fileItem.file.name);
@@ -89,7 +97,6 @@ const FileUpload = () => {
         prev.map((f) => (f.id === fileItem.id ? { ...f, progress: 50 } : f))
       );
 
-      // Prepare form data
       const formData = new FormData();
       formData.append('file', encrypted, fileItem.file.name);
       formData.append('encryptionKey', key);
@@ -97,11 +104,8 @@ const FileUpload = () => {
       formData.append('iv', iv);
       formData.append('fileType', fileType);
 
-      // Upload
-      setFiles((prev) =>
-        prev.map((f) => (f.id === fileItem.id ? { ...f, status: 'uploading' } : f))
-      );
       const token = localStorage.getItem('token');
+      console.log('Uploading file:', { filename: fileItem.file.name, fileType, userEmail });
       const response = await axios.post(`${import.meta.env.VITE_BACKEND_URI}/api/files/upload`, formData, {
         headers: {
           Authorization: `Bearer ${token}`,
@@ -115,7 +119,11 @@ const FileUpload = () => {
         },
       });
 
-      console.log('Upload response:', { fileId: response.data.fileId, filename: fileItem.file.name });
+      console.log('Upload response:', { 
+        fileId: response.data.fileId, 
+        filename: fileItem.file.name, 
+        message: response.data.message 
+      });
       setFiles((prev) =>
         prev.map((f) => (f.id === fileItem.id ? { ...f, status: 'completed' } : f))
       );
@@ -130,10 +138,9 @@ const FileUpload = () => {
         message: error.message,
         status: error.response?.status,
         response: error.response?.data,
+        retryCount: fileItem.retryCount,
       });
-
-      // Retry logic (max 2 retries)
-      if (!retry && fileItem.retryCount < 2) {
+      if (!retry && fileItem.retryCount < 2 && error.response?.status !== 400 && error.response?.status !== 401) {
         setFiles((prev) =>
           prev.map((f) =>
             f.id === fileItem.id ? { ...f, status: 'retrying', retryCount: f.retryCount + 1 } : f
@@ -144,7 +151,7 @@ const FileUpload = () => {
           description: `Retrying ${fileItem.file.name} (Attempt ${fileItem.retryCount + 2}/3).`,
           type: 'info',
         });
-        await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2s
+        await new Promise((resolve) => setTimeout(resolve, 2000));
         await encryptAndUpload({ ...fileItem, retryCount: fileItem.retryCount + 1 }, userEmail, true);
       } else {
         setFiles((prev) =>
@@ -155,15 +162,24 @@ const FileUpload = () => {
           description: error.response?.data?.message || `Failed to upload ${fileItem.file.name}: ${error.message}`,
           type: 'error',
         });
+        if (error.response?.status === 401) {
+          console.error('Unauthorized upload, redirecting to login');
+          localStorage.removeItem('token');
+          localStorage.removeItem('userId');
+          localStorage.removeItem('userEmail');
+          window.location.href = '/login';
+        }
       }
     }
   };
 
   const removeFile = (id) => {
+    console.log('Removing file from queue:', { fileId: id });
     setFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
   const retryUpload = (fileItem) => {
+    console.log('Retrying upload:', { filename: fileItem.file.name, retryCount: fileItem.retryCount });
     setFiles((prev) =>
       prev.map((f) => (f.id === fileItem.id ? { ...f, status: 'pending', progress: 0, retryCount: 0 } : f))
     );

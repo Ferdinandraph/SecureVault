@@ -9,6 +9,7 @@ const FileManager = ({ onShare }) => {
   const [menuOpen, setMenuOpen] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
   const { addToast } = useToast();
   const navigate = useNavigate();
 
@@ -16,37 +17,55 @@ const FileManager = ({ onShare }) => {
     fetchFiles();
   }, []);
 
-  const fetchFiles = async () => {
+  const fetchFiles = async (isRetry = false) => {
     try {
       setLoading(true);
       setError(null);
       const token = localStorage.getItem('token');
       if (!token) {
+        console.error('No token found in localStorage');
         addToast({ title: 'Authentication Error', description: 'Please log in again.', type: 'error' });
         navigate('/login');
         return;
       }
+      console.log('Fetching files:', { userId: localStorage.getItem('userId'), attempt: retryCount + 1 });
       const response = await axios.get(`${import.meta.env.VITE_BACKEND_URI}/api/files/list`, {
         headers: { Authorization: `Bearer ${token}` },
       });
-      // Ensure files is always an array
       const data = Array.isArray(response.data) ? response.data : [];
+      console.log('Files fetched:', { fileCount: data.length, files: data.map(f => f.filename) });
       setFiles(data);
+      setRetryCount(0);
     } catch (error) {
-      console.error('Fetch files error:', error);
-      setError(error.response?.data?.message || 'Failed to fetch files.');
+      console.error('Fetch files error:', {
+        message: error.message,
+        status: error.response?.status,
+        response: error.response?.data,
+        userId: localStorage.getItem('userId'),
+      });
+      const errorMessage = error.response?.data?.message || 'Failed to fetch files. Please try again.';
+      setError(errorMessage);
       addToast({
         title: 'Error',
-        description: error.response?.data?.message || 'Failed to fetch files.',
+        description: errorMessage,
         type: 'error',
       });
       if (error.response?.status === 401) {
+        console.error('Unauthorized, clearing localStorage');
         localStorage.removeItem('token');
         localStorage.removeItem('userId');
         localStorage.removeItem('userEmail');
         navigate('/login');
+      } else if (!isRetry && retryCount < 2) {
+        setRetryCount(retryCount + 1);
+        addToast({
+          title: 'Retrying Fetch',
+          description: `Retrying file fetch (Attempt ${retryCount + 2}/3).`,
+          type: 'info',
+        });
+        setTimeout(() => fetchFiles(true), 2000);
       }
-      setFiles([]); // Reset to empty array to prevent map errors
+      setFiles([]);
     } finally {
       setLoading(false);
     }
@@ -54,7 +73,12 @@ const FileManager = ({ onShare }) => {
 
   const decryptPrivateKey = async (password) => {
     try {
-      const [encryptedPrivateKey, salt, iv] = localStorage.getItem('encryptedPrivateKey').split(':');
+      const encryptedPrivateKeyData = localStorage.getItem('encryptedPrivateKey');
+      if (!encryptedPrivateKeyData) {
+        throw new Error('No encrypted private key found in localStorage');
+      }
+      const [encryptedPrivateKey, salt, iv] = encryptedPrivateKeyData.split(':');
+      console.log('Decrypting private key:', { userId: localStorage.getItem('userId') });
       const passwordKey = await crypto.subtle.deriveKey(
         {
           name: 'PBKDF2',
@@ -72,20 +96,24 @@ const FileManager = ({ onShare }) => {
         passwordKey,
         Uint8Array.from(atob(encryptedPrivateKey), (c) => c.charCodeAt(0))
       );
-      return await crypto.subtle.importKey(
+      const privateKey = await crypto.subtle.importKey(
         'pkcs8',
         privateKeyData,
         { name: 'RSA-OAEP', hash: 'SHA-256' },
         false,
         ['decrypt']
       );
+      console.log('Private key decrypted successfully');
+      return privateKey;
     } catch (error) {
-      throw new Error('Failed to decrypt private key: ' + error.message);
+      console.error('Decrypt private key error:', { message: error.message });
+      throw new Error('Failed to decrypt private key: Invalid password or corrupted key data.');
     }
   };
 
   const decryptFile = async (encryptedData, base64Key, base64Iv, file, password) => {
     try {
+      console.log('Decrypting file:', { filename: file.filename, fileId: file._id });
       const privateKey = await decryptPrivateKey(password);
       const aesKeyData = await crypto.subtle.decrypt(
         { name: 'RSA-OAEP' },
@@ -115,13 +143,19 @@ const FileManager = ({ onShare }) => {
         docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
       };
       const mimeType = mimeTypes[extension] || 'application/octet-stream';
+      console.log('File decrypted successfully:', { filename: file.filename });
       return new Blob([decryptedData], { type: mimeType });
     } catch (error) {
-      throw new Error('Decryption failed: ' + error.message);
+      console.error('Decrypt file error:', {
+        filename: file.filename,
+        fileId: file._id,
+        message: error.message,
+      });
+      throw new Error('Decryption failed: Invalid password or corrupted file data.');
     }
   };
 
-  const handleDownload = async (file) => {
+  const handleDownload = async (file, retry = false) => {
     try {
       const password = prompt('Enter your password to decrypt the file:');
       if (!password) {
@@ -129,6 +163,12 @@ const FileManager = ({ onShare }) => {
         return;
       }
       const token = localStorage.getItem('token');
+      if (!token) {
+        addToast({ title: 'Authentication Error', description: 'Please log in again.', type: 'error' });
+        navigate('/login');
+        return;
+      }
+      console.log('Downloading file:', { fileId: file._id, filename: file.filename });
       const response = await axios.get(`${import.meta.env.VITE_BACKEND_URI}/api/files/download/${file._id}`, {
         headers: { Authorization: `Bearer ${token}` },
         responseType: 'blob',
@@ -152,23 +192,48 @@ const FileManager = ({ onShare }) => {
         type: 'success',
       });
     } catch (error) {
-      console.error('Download error:', error);
-      addToast({
-        title: 'Download Failed',
-        description: error.message || 'Failed to download or decrypt file.',
-        type: 'error',
+      console.error('Download error:', {
+        fileId: file._id,
+        filename: file.filename,
+        message: error.message,
+        status: error.response?.status,
+        response: error.response?.data,
       });
+      if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
+        addToast({
+          title: 'Retrying Download',
+          description: `Retrying download for ${file.filename} (Attempt 2/2).`,
+          type: 'info',
+        });
+        setTimeout(() => handleDownload(file, true), 2000);
+      } else {
+        addToast({
+          title: 'Download Failed',
+          description: error.message || 'Failed to download or decrypt file. Check password or file availability.',
+          type: 'error',
+        });
+        if (error.response?.status === 404) {
+          fetchFiles();
+        }
+      }
     }
   };
 
   const handleShare = (file) => {
+    console.log('Initiating share:', { fileId: file._id, filename: file.filename });
     onShare(file);
     setMenuOpen(null);
   };
 
-  const handleDelete = async (file) => {
+  const handleDelete = async (file, retry = false) => {
     try {
       const token = localStorage.getItem('token');
+      if (!token) {
+        addToast({ title: 'Authentication Error', description: 'Please log in again.', type: 'error' });
+        navigate('/login');
+        return;
+      }
+      console.log('Deleting file:', { fileId: file._id, filename: file.filename });
       await axios.delete(`${import.meta.env.VITE_BACKEND_URI}/api/files/delete/${file._id}`, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -179,14 +244,29 @@ const FileManager = ({ onShare }) => {
         type: 'success',
       });
     } catch (error) {
-      console.error('Delete error:', error);
-      addToast({
-        title: 'Delete Failed',
-        description: error.response?.data?.message || 'Failed to delete file.',
-        type: 'error',
+      console.error('Delete error:', {
+        fileId: file._id,
+        filename: file.filename,
+        message: error.message,
+        status: error.response?.status,
+        response: error.response?.data,
       });
-      if (error.response?.status === 404) {
-        fetchFiles();
+      if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
+        addToast({
+          title: 'Retrying Delete',
+          description: `Retrying delete for ${file.filename} (Attempt 2/2).`,
+          type: 'info',
+        });
+        setTimeout(() => handleDelete(file, true), 2000);
+      } else {
+        addToast({
+          title: 'Delete Failed',
+          description: error.response?.data?.message || `Failed to delete ${file.filename}.`,
+          type: 'error',
+        });
+        if (error.response?.status === 404) {
+          fetchFiles();
+        }
       }
     }
   };
@@ -208,7 +288,7 @@ const FileManager = ({ onShare }) => {
       <div className="text-center text-gray-600">
         <p>{error}</p>
         <button
-          onClick={fetchFiles}
+          onClick={() => fetchFiles()}
           className="mt-4 bg-blue-500 text-white px-4 py-2 rounded-lg hover:bg-blue-600"
         >
           Retry

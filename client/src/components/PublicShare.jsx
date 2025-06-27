@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { FileText, Download, Lock } from 'lucide-react';
 import axios from 'axios';
 import { useParams } from 'react-router-dom';
+import { useToast } from './Toast'; // Assuming Toast is used for notifications
 
 const PublicShare = () => {
   const { fileId, token } = useParams();
@@ -9,23 +10,44 @@ const PublicShare = () => {
   const [fileInfo, setFileInfo] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState('');
+  const [retryCount, setRetryCount] = useState(0);
+  const { addToast } = useToast();
 
-  React.useEffect(() => {
+  useEffect(() => {
     const fetchFileInfo = async () => {
       try {
+        console.log('Fetching file info:', { fileId, token });
         const response = await axios.get(`${import.meta.env.VITE_BACKEND_URI}/api/files/public/share/${fileId}/${token}`);
+        console.log('File info received:', { 
+          fileId: response.data._id, 
+          filename: response.data.filename, 
+          size: response.data.size 
+        });
         setFileInfo(response.data);
         setIsLoading(false);
       } catch (err) {
-        setError(err.response?.data?.message || 'Invalid share link.');
+        console.error('Fetch file info error:', {
+          fileId,
+          token,
+          message: err.message,
+          status: err.response?.status,
+          response: err.response?.data,
+        });
+        setError(err.response?.data?.message || 'Invalid share link. Please check the link or try again.');
         setIsLoading(false);
+        addToast({
+          title: 'Error',
+          description: err.response?.data?.message || 'Failed to load file information.',
+          type: 'error',
+        });
       }
     };
     fetchFileInfo();
-  }, [fileId, token]);
+  }, [fileId, token, addToast]);
 
   const decryptFile = async (encryptedData, encryptedKey, salt, iv, filename, fileIv) => {
     try {
+      console.log('Decrypting file:', { filename, encryptedKeyLength: encryptedKey.length });
       const passwordKey = await crypto.subtle.deriveKey(
         {
           name: 'PBKDF2',
@@ -67,21 +89,41 @@ const PublicShare = () => {
       const mimeType = mimeTypes[extension] || 'application/octet-stream';
       return new Blob([decryptedData], { type: mimeType });
     } catch (error) {
-      throw new Error('Decryption failed: ' + error.message);
+      console.error('Decryption error:', { filename, message: error.message });
+      throw new Error('Decryption failed: Invalid key or corrupted data.');
     }
   };
 
   const handleDownload = async () => {
     if (!decryptionKey) {
       setError('Please enter the decryption key.');
+      addToast({
+        title: 'Input Error',
+        description: 'Decryption key is required.',
+        type: 'error',
+      });
       return;
     }
+    if (!fileInfo || !fileInfo.sharedWith) {
+      setError('File information not loaded.');
+      addToast({
+        title: 'Error',
+        description: 'File information not available. Please refresh and try again.',
+        type: 'error',
+      });
+      return;
+    }
+
     try {
       setIsLoading(true);
+      console.log('Downloading file:', { fileId, token, retryCount });
       const response = await axios.get(`${import.meta.env.VITE_BACKEND_URI}/api/files/public/download/${fileId}/${token}`, {
         responseType: 'blob',
       });
       const share = fileInfo.sharedWith.find((s) => s.publicToken === token);
+      if (!share) {
+        throw new Error('Invalid share token.');
+      }
       const decryptedBlob = await decryptFile(
         response.data,
         share.encryptedKey,
@@ -99,8 +141,36 @@ const PublicShare = () => {
       document.body.removeChild(link);
       window.URL.revokeObjectURL(url);
       setError('');
+      addToast({
+        title: 'Success',
+        description: `File ${fileInfo.filename} downloaded successfully.`,
+        type: 'success',
+      });
     } catch (err) {
-      setError(err.message || 'Failed to download or decrypt file.');
+      console.error('Download error:', {
+        fileId,
+        token,
+        message: err.message,
+        status: err.response?.status,
+        response: err.response?.data,
+      });
+      if (retryCount < 2 && err.response?.status !== 400 && err.response?.status !== 404) {
+        setRetryCount(retryCount + 1);
+        setError(`Download failed. Retrying... (Attempt ${retryCount + 2}/3)`);
+        addToast({
+          title: 'Retrying Download',
+          description: `Retrying download for ${fileInfo?.filename || 'file'} (Attempt ${retryCount + 2}/3).`,
+          type: 'info',
+        });
+        setTimeout(() => handleDownload(), 2000); // Retry after 2s
+      } else {
+        setError(err.message || 'Failed to download or decrypt file. Check the decryption key or link.');
+        addToast({
+          title: 'Error',
+          description: err.message || 'Failed to download or decrypt file.',
+          type: 'error',
+        });
+      }
     } finally {
       setIsLoading(false);
     }
@@ -119,7 +189,17 @@ const PublicShare = () => {
   }
 
   if (error) {
-    return <div className="text-center p-6 text-red-600">{error}</div>;
+    return (
+      <div className="max-w-md mx-auto p-6 bg-white rounded-lg shadow-md">
+        <div className="text-center text-red-600">{error}</div>
+        <button
+          onClick={() => window.location.reload()}
+          className="mt-4 bg-blue-500 text-white px-4 py-2 rounded-md hover:bg-blue-600"
+        >
+          Retry
+        </button>
+      </div>
+    );
   }
 
   return (
