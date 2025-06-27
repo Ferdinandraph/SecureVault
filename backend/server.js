@@ -2,12 +2,24 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const dotenv = require('dotenv');
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
 const authRoutes = require('./routes/auth');
 const fileRoutes = require('./routes/files');
 const userRoutes = require('./routes/user');
 
 dotenv.config();
 const app = express();
+
+// Security headers
+app.use(helmet());
+
+// Rate limiting
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+});
+app.use(limiter);
 
 // Normalize origin to remove trailing slashes
 const normalizeOrigin = (origin) => origin?.replace(/\/$/, '');
@@ -17,15 +29,6 @@ const allowedOrigins = [
   normalizeOrigin(process.env.CLIENT_URI), // e.g., https://secure-vault-beta.vercel.app
   normalizeOrigin(process.env.CLIENT_URI_DEV), // e.g., http://localhost:3000
 ].filter(Boolean);
-
-// Apply CORS for public routes separately
-app.use('/api/files/public', cors({
-  origin: '*', // Allow all origins for public routes
-  methods: ['GET', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-}));
-
-// Apply CORS for authenticated routes
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -36,9 +39,9 @@ app.use(
         callback(new Error('Not allowed by CORS'));
       }
     },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
-    credentials: true,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Allow necessary methods
+    allowedHeaders: ['Content-Type', 'Authorization'], // Allow necessary headers
+    credentials: true, // Support cookies/tokens
   })
 );
 
