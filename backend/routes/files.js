@@ -193,6 +193,7 @@ router.get('/list', authMiddleware, async (req, res) => {
 router.get('/download/:fileId', authMiddleware, async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.fileId)) {
+      console.log('Invalid file ID:', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'Invalid file ID.' });
     }
     const file = await File.findById(req.params.fileId);
@@ -211,17 +212,31 @@ router.get('/download/:fileId', authMiddleware, async (req, res) => {
       console.log('Missing gridfsFileId:', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'File storage ID missing.' });
     }
+
+    // Verify GridFS file exists
+    const gridfsFile = await mongoose.connection.db.collection('uploads.files').findOne({ _id: file.gridfsFileId });
+    if (!gridfsFile) {
+      console.log('GridFS file not found:', { fileId: req.params.fileId, gridfsFileId: file.gridfsFileId });
+      return res.status(404).json({ message: 'File data unavailable in storage.' });
+    }
+
     const downloadStream = gfs.openDownloadStream(file.gridfsFileId);
     let fileData = [];
     downloadStream.on('data', (chunk) => fileData.push(chunk));
     downloadStream.on('error', (error) => {
-      console.error('Download stream error:', { fileId: req.params.fileId, error: error.message });
-      res.status(404).json({ message: 'File not found in storage.' });
+      console.error('Download stream error:', {
+        fileId: req.params.fileId,
+        gridfsFileId: file.gridfsFileId,
+        message: error.message,
+        stack: error.stack,
+      });
+      res.status(404).json({ message: 'Failed to retrieve file data from storage.', error: error.message });
     });
     downloadStream.on('end', () => {
       const buffer = Buffer.concat(fileData);
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+      console.log('File streamed successfully:', { fileId: req.params.fileId, filename: file.filename });
       res.send(buffer);
     });
   } catch (error) {
@@ -230,7 +245,11 @@ router.get('/download/:fileId', authMiddleware, async (req, res) => {
       stack: error.stack,
       fileId: req.params.fileId,
     });
-    res.status(500).json({ message: 'Server error.', error: error.message });
+    let errorMessage = 'Server error.';
+    if (error.message.includes('failed to get stat')) {
+      errorMessage = 'Failed to access file data in storage. File may be corrupted or missing.';
+    }
+    res.status(500).json({ message: errorMessage, error: error.message });
   }
 });
 
@@ -511,17 +530,31 @@ router.get('/public/download/:fileId/:token', async (req, res) => {
       console.log('Missing gridfsFileId:', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'File storage ID missing.' });
     }
+
+    // Verify GridFS file exists
+    const gridfsFile = await mongoose.connection.db.collection('uploads.files').findOne({ _id: file.gridfsFileId });
+    if (!gridfsFile) {
+      console.log('GridFS file not found:', { fileId: req.params.fileId, gridfsFileId: file.gridfsFileId });
+      return res.status(404).json({ message: 'File data unavailable in storage.' });
+    }
+
     const downloadStream = gfs.openDownloadStream(file.gridfsFileId);
     let fileData = [];
     downloadStream.on('data', (chunk) => fileData.push(chunk));
     downloadStream.on('error', (error) => {
-      console.error('Download stream error:', { fileId: req.params.fileId, error: error.message });
-      res.status(404).json({ message: 'File not found in storage.' });
+      console.error('Download stream error:', {
+        fileId: req.params.fileId,
+        gridfsFileId: file.gridfsFileId,
+        message: error.message,
+        stack: error.stack,
+      });
+      res.status(404).json({ message: 'Failed to retrieve file data from storage.', error: error.message });
     });
     downloadStream.on('end', () => {
       const buffer = Buffer.concat(fileData);
       res.setHeader('Content-Type', 'application/octet-stream');
       res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+      console.log('File streamed successfully:', { fileId: req.params.fileId, filename: file.filename });
       res.send(buffer);
     });
   } catch (error) {
@@ -531,7 +564,11 @@ router.get('/public/download/:fileId/:token', async (req, res) => {
       fileId: req.params.fileId,
       token: req.params.token,
     });
-    res.status(500).json({ message: 'Server error.', error: error.message });
+    let errorMessage = 'Server error.';
+    if (error.message.includes('failed to get stat')) {
+      errorMessage = 'Failed to access file data in storage. File may be corrupted or missing.';
+    }
+    res.status(500).json({ message: errorMessage, error: error.message });
   }
 });
 

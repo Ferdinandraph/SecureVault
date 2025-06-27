@@ -1,7 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { FileText, Trash2, Download, Share2, Link } from 'lucide-react';
 import { useToast } from './Toast';
 import axios from 'axios';
+
+// Debounce utility to prevent rapid clicks
+const debounce = (func, wait) => {
+  let timeout;
+  return (...args) => {
+    clearTimeout(timeout);
+    timeout = setTimeout(() => func(...args), wait);
+  };
+};
 
 const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
   const [selectedFile, setSelectedFile] = useState(initialFile);
@@ -14,6 +23,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
   const [userFiles, setUserFiles] = useState([]);
   const [isValidating, setIsValidating] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
+  const [isDownloading, setIsDownloading] = useState(false); // Prevent multiple downloads
   const { addToast } = useToast();
 
   useEffect(() => {
@@ -218,7 +228,17 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     }
   };
 
-  const downloadReceivedFile = async (fileId, filename, encryptedKey, salt, iv, retry = false) => {
+  const downloadReceivedFile = useCallback(debounce(async (fileId, filename, encryptedKey, salt, iv, retry = false) => {
+    if (isDownloading) {
+      console.log('Download already in progress:', { fileId, filename });
+      addToast({
+        title: 'Download In Progress',
+        description: 'Please wait for the current download to complete.',
+        type: 'info',
+      });
+      return;
+    }
+    setIsDownloading(true);
     try {
       const inputDecryptionKey = prompt('Enter the decryption key provided by the sender:');
       if (!inputDecryptionKey) {
@@ -268,6 +288,16 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         name: error.name,
         stack: error.stack,
         status: error.response?.status,
+        responseData: error.response?.data,
+      });
+      let errorMessage = error.message || 'Failed to download or decrypt file. Check the decryption key.';
+      if (error.response?.data?.message?.includes('failed to get stat')) {
+        errorMessage = 'File data is unavailable or corrupted. Contact the file owner.';
+      }
+      addToast({
+        title: 'Error',
+        description: errorMessage,
+        type: 'error',
       });
       if (!retry && error.response?.status && error.response.status !== 400 && error.response.status !== 404 && error.response.status !== 403) {
         addToast({
@@ -276,15 +306,11 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           type: 'info',
         });
         setTimeout(() => downloadReceivedFile(fileId, filename, encryptedKey, salt, iv, true), 2000);
-      } else {
-        addToast({
-          title: 'Error',
-          description: error.message || 'Failed to download or decrypt file. Check the decryption key.',
-          type: 'error',
-        });
       }
+    } finally {
+      setIsDownloading(false);
     }
-  };
+  }, 500), []); // Debounce for 500ms
 
   const handleShare = async (retry = false) => {
     if (!selectedFile) {
@@ -690,7 +716,8 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
                   </div>
                   <button
                     onClick={() => downloadReceivedFile(file._id, file.filename, userShare.encryptedKey, userShare.salt, userShare.iv)}
-                    className="text-blue-600 hover:text-blue-800 flex items-center"
+                    disabled={isDownloading}
+                    className="text-blue-600 hover:text-blue-800 flex items-center disabled:opacity-50"
                   >
                     <Download className="h-4 w-4 mr-1" />
                     Download
