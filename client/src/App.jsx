@@ -15,7 +15,13 @@ export const AuthContext = createContext();
 
 const PrivateRoute = ({ children }) => {
   const { isAuthenticated, loading } = React.useContext(AuthContext);
-  if (loading) return null; // Wait until validation completes
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-screen">
+        <p className="text-gray-600">Loading...</p>
+      </div>
+    );
+  }
   return isAuthenticated ? children : <Navigate to="/login" replace />;
 };
 
@@ -32,7 +38,11 @@ const App = () => {
       console.log('Token validation response:', response.data);
       return true;
     } catch (error) {
-      console.error('Token validation error:', error.response?.data || error.message);
+      console.error('Token validation error:', {
+        message: error.message,
+        status: error.response?.status,
+        response: error.response?.data,
+      });
       if (error.response?.status === 401 || error.response?.status === 404) {
         logout();
       }
@@ -56,6 +66,8 @@ const App = () => {
         setLoading(false);
       });
     } else {
+      setIsAuthenticated(false);
+      setUser(null);
       setLoading(false);
     }
   }, []);
