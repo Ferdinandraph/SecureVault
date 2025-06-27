@@ -64,6 +64,7 @@ const FileUpload = () => {
       file,
       progress: 0,
       status: 'pending',
+      retryCount: 0,
     }));
 
     setFiles((prev) => [...prev, ...newFiles]);
@@ -72,13 +73,14 @@ const FileUpload = () => {
     }
   };
 
-  const encryptAndUpload = async (fileItem, userEmail) => {
+  const encryptAndUpload = async (fileItem, userEmail, retry = false) => {
     setFiles((prev) =>
       prev.map((f) => (f.id === fileItem.id ? { ...f, status: 'encrypting' } : f))
     );
 
     try {
-      // Encrypt file using encrypt.js
+      // Encrypt file
+      console.log('Encrypting file:', { filename: fileItem.file.name, size: fileItem.file.size });
       const { encrypted, key, encryptedKey, iv } = await encryptFile(fileItem.file, userEmail);
       const fileType = getFileType(fileItem.file.name);
       if (!fileType) throw new Error('Failed to determine file type');
@@ -113,6 +115,7 @@ const FileUpload = () => {
         },
       });
 
+      console.log('Upload response:', { fileId: response.data.fileId, filename: fileItem.file.name });
       setFiles((prev) =>
         prev.map((f) => (f.id === fileItem.id ? { ...f, status: 'completed' } : f))
       );
@@ -122,20 +125,49 @@ const FileUpload = () => {
         type: 'success',
       });
     } catch (error) {
-      console.error('Upload error:', error);
-      setFiles((prev) =>
-        prev.map((f) => (f.id === fileItem.id ? { ...f, status: 'failed' } : f))
-      );
-      addToast({
-        title: 'Upload Failed',
-        description: error.response?.data?.message || 'Failed to upload file: ' + error.message,
-        type: 'error',
+      console.error('Upload error:', {
+        filename: fileItem.file.name,
+        message: error.message,
+        status: error.response?.status,
+        response: error.response?.data,
       });
+
+      // Retry logic (max 2 retries)
+      if (!retry && fileItem.retryCount < 2) {
+        setFiles((prev) =>
+          prev.map((f) =>
+            f.id === fileItem.id ? { ...f, status: 'retrying', retryCount: f.retryCount + 1 } : f
+          )
+        );
+        addToast({
+          title: 'Retrying Upload',
+          description: `Retrying ${fileItem.file.name} (Attempt ${fileItem.retryCount + 2}/3).`,
+          type: 'info',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 2000)); // Wait 2s
+        await encryptAndUpload({ ...fileItem, retryCount: fileItem.retryCount + 1 }, userEmail, true);
+      } else {
+        setFiles((prev) =>
+          prev.map((f) => (f.id === fileItem.id ? { ...f, status: 'failed' } : f))
+        );
+        addToast({
+          title: 'Upload Failed',
+          description: error.response?.data?.message || `Failed to upload ${fileItem.file.name}: ${error.message}`,
+          type: 'error',
+        });
+      }
     }
   };
 
   const removeFile = (id) => {
     setFiles((prev) => prev.filter((f) => f.id !== id));
+  };
+
+  const retryUpload = (fileItem) => {
+    setFiles((prev) =>
+      prev.map((f) => (f.id === fileItem.id ? { ...f, status: 'pending', progress: 0, retryCount: 0 } : f))
+    );
+    encryptAndUpload({ ...fileItem, status: 'pending', progress: 0, retryCount: 0 }, localStorage.getItem('userEmail'));
   };
 
   const formatFileSize = (bytes) => {
@@ -192,6 +224,14 @@ const FileUpload = () => {
                 <div className="flex items-center space-x-2">
                   {fileItem.status === 'encrypting' && (
                     <Shield className="h-4 w-4 text-blue-500 animate-pulse" />
+                  )}
+                  {fileItem.status === 'failed' && (
+                    <button
+                      onClick={() => retryUpload(fileItem)}
+                      className="text-blue-600 hover:text-blue-800 text-sm"
+                    >
+                      Retry
+                    </button>
                   )}
                   <button
                     onClick={() => removeFile(fileItem.id)}

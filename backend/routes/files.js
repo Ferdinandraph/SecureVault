@@ -1,10 +1,10 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
 const multer = require('multer');
-const path = require('path');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const nodemailer = require('nodemailer');
+const { GridFSBucket } = require('mongodb');
 const File = require('../models/File');
 const User = require('../models/User');
 const authMiddleware = require('../middleware/authMiddleware');
@@ -20,15 +20,28 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Multer setup
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, process.env.UPLOAD_DIR || './Uploads'),
-  filename: (req, file, cb) => {
-    const timestamp = Date.now();
-    cb(null, `${timestamp}-${file.originalname}`);
-  },
-});
+// Multer setup for memory storage (files go to MongoDB)
+const storage = multer.memoryStorage();
 const upload = multer({ storage, limits: { fileSize: 100 * 1024 * 1024 } });
+
+// Initialize GridFS
+let gfs;
+mongoose.connection.once('open', () => {
+  gfs = new GridFSBucket(mongoose.connection.db, { bucketName: 'uploads' });
+  console.log('GridFS initialized');
+});
+
+// Debug endpoint to list uploaded files in GridFS
+router.get('/debug/uploads', async (req, res) => {
+  try {
+    const files = await mongoose.connection.db.collection('uploads.files').find().toArray();
+    console.log('Debug uploads:', { fileCount: files.length, files: files.map(f => f.filename) });
+    res.status(200).json({ files });
+  } catch (error) {
+    console.error('Debug uploads error:', { message: error.message, stack: error.stack });
+    res.status(500).json({ message: 'Cannot read uploads.', error: error.message });
+  }
+});
 
 // Upload file
 router.post('/upload', authMiddleware, upload.single('file'), async (req, res) => {
@@ -37,6 +50,7 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
     console.log('Upload attempt:', {
       userId: req.user.id,
       filename: req.file?.originalname,
+      size: req.file?.size,
       encryptionKeyLength: encryptionKey?.length,
       encryptedKeyLength: encryptedKey?.length,
       iv: !!iv,
@@ -44,9 +58,17 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
     });
 
     if (!req.file || !encryptionKey || !encryptedKey || !iv || !fileType) {
+      console.log('Missing fields:', {
+        file: !!req.file,
+        encryptionKey: !!encryptionKey,
+        encryptedKey: !!encryptedKey,
+        iv: !!iv,
+        fileType: !!fileType,
+      });
       return res.status(400).json({ message: 'Missing required fields.' });
     }
     if (!mongoose.Types.ObjectId.isValid(req.user.id)) {
+      console.log('Invalid user ID:', { userId: req.user.id });
       return res.status(400).json({ message: 'Invalid user ID.' });
     }
 
@@ -54,27 +76,40 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
     try {
       aesKeyBuffer = Buffer.from(encryptionKey, 'base64');
     } catch (e) {
-      console.log('Invalid base64 encoding for encryptionKey', { error: e.message });
+      console.log('Invalid base64 encoding for encryptionKey:', { error: e.message });
       return res.status(400).json({ message: 'Invalid encryption key encoding.' });
     }
     if (aesKeyBuffer.length !== 32) {
-      console.log('Invalid AES key size', { length: aesKeyBuffer.length });
+      console.log('Invalid AES key size:', { length: aesKeyBuffer.length });
       return res.status(400).json({ message: `Invalid AES key size: expected 32 bytes, got ${aesKeyBuffer.length}.` });
     }
 
     try {
       Buffer.from(encryptedKey, 'base64');
     } catch (e) {
-      console.log('Invalid base64 encoding for encryptedKey', { error: e.message });
+      console.log('Invalid base64 encoding for encryptedKey:', { error: e.message });
       return res.status(400).json({ message: 'Invalid encrypted key encoding.' });
     }
 
     const user = await User.findById(req.user.id);
-    if (!user) return res.status(404).json({ message: 'User not found.' });
+    if (!user) {
+      console.log('User not found:', { userId: req.user.id });
+      return res.status(404).json({ message: 'User not found.' });
+    }
+
+    // Store file in GridFS
+    const uploadStream = gfs.openUploadStream(req.file.originalname, {
+      metadata: { userId: req.user.id, timestamp: Date.now() },
+    });
+    uploadStream.end(req.file.buffer);
+    const gridfsFileId = await new Promise((resolve, reject) => {
+      uploadStream.on('finish', () => resolve(uploadStream.id));
+      uploadStream.on('error', reject);
+    });
 
     const file = new File({
       filename: req.file.originalname,
-      path: req.file.path,
+      gridfsFileId: gridfsFileId,
       size: req.file.size,
       userId: new mongoose.Types.ObjectId(req.user.id),
       encryptionKey,
@@ -85,13 +120,15 @@ router.post('/upload', authMiddleware, upload.single('file'), async (req, res) =
     });
 
     await file.save();
-    console.log('File saved:', { fileId: file._id });
+    console.log('File saved:', { fileId: file._id, gridfsFileId });
     res.status(200).json({ message: 'File uploaded successfully.', fileId: file._id });
   } catch (error) {
     console.error('Upload error:', {
       message: error.message,
       stack: error.stack,
       code: error.code,
+      userId: req.user?.id,
+      filename: req.file?.originalname,
     });
     if (error.code === 11000) {
       return res.status(400).json({ message: 'Duplicate share link error. Please try again.' });
@@ -111,7 +148,7 @@ router.get('/list', authMiddleware, async (req, res) => {
         { userId: new mongoose.Types.ObjectId(req.user.id) },
         { 'sharedWith.userId': new mongoose.Types.ObjectId(req.user.id) },
       ],
-    }).select('-path');
+    });
     console.log('Files listed for user:', { userId: req.user.id, fileCount: files.length });
     res.status(200).json(files);
   } catch (error) {
@@ -131,23 +168,36 @@ router.get('/download/:fileId', authMiddleware, async (req, res) => {
       return res.status(400).json({ message: 'Invalid file ID.' });
     }
     const file = await File.findById(req.params.fileId);
-    if (!file) return res.status(404).json({ message: 'File not found.' });
+    if (!file) {
+      console.log('File not found:', { fileId: req.params.fileId });
+      return res.status(404).json({ message: 'File not found.' });
+    }
     if (
       file.userId.toString() !== req.user.id &&
       !file.sharedWith.some((share) => share.userId?.toString() === req.user.id)
     ) {
+      console.log('Unauthorized access:', { fileId: req.params.fileId, userId: req.user.id });
       return res.status(403).json({ message: 'Unauthorized access.' });
     }
-    const safePath = path.resolve(file.path);
-    const uploadDirPath = path.resolve(process.env.UPLOAD_DIR || './Uploads');
-    if (!safePath.startsWith(uploadDirPath)) {
-      return res.status(403).json({ message: 'Invalid file path.' });
-    }
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
-    res.sendFile(safePath);
+    const downloadStream = gfs.openDownloadStream(file.gridfsFileId);
+    let fileData = [];
+    downloadStream.on('data', (chunk) => fileData.push(chunk));
+    downloadStream.on('error', (error) => {
+      console.error('Download stream error:', { fileId: req.params.fileId, error: error.message });
+      res.status(404).json({ message: 'File not found in storage.' });
+    });
+    downloadStream.on('end', () => {
+      const buffer = Buffer.concat(fileData);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+      res.send(buffer);
+    });
   } catch (error) {
-    console.error('Download error:', error);
+    console.error('Download error:', {
+      message: error.message,
+      stack: error.stack,
+      fileId: req.params.fileId,
+    });
     res.status(500).json({ message: 'Server error.', error: error.message });
   }
 });
@@ -170,7 +220,10 @@ router.get('/validate/:fileId', authMiddleware, async (req, res) => {
     console.log('Validation succeeded', { fileId: req.params.fileId });
     res.status(200).json({ message: 'File exists.' });
   } catch (error) {
-    console.error('Validate error:', error);
+    console.error('Validate error:', {
+      message: error.message,
+      stack: error.stack,
+    });
     res.status(500).json({ message: 'Server error.', error: error.message });
   }
 });
@@ -182,15 +235,24 @@ router.delete('/delete/:fileId', authMiddleware, async (req, res) => {
       return res.status(400).json({ message: 'Invalid file ID.' });
     }
     const file = await File.findById(req.params.fileId);
-    if (!file) return res.status(404).json({ message: 'File not found.' });
+    if (!file) {
+      console.log('File not found:', { fileId: req.params.fileId });
+      return res.status(404).json({ message: 'File not found.' });
+    }
     if (file.userId.toString() !== req.user.id) {
+      console.log('Unauthorized access:', { fileId: req.params.fileId, userId: req.user.id });
       return res.status(403).json({ message: 'Unauthorized access.' });
     }
+    await gfs.delete(file.gridfsFileId);
     await File.deleteOne({ _id: req.params.fileId });
-    console.log('File deleted:', { fileId: req.params.fileId });
+    console.log('File deleted:', { fileId: req.params.fileId, gridfsFileId: file.gridfsFileId });
     res.status(200).json({ message: 'File deleted successfully.' });
   } catch (error) {
-    console.error('Delete error:', error);
+    console.error('Delete error:', {
+      message: error.message,
+      stack: error.stack,
+      fileId: req.params.fileId,
+    });
     res.status(500).json({ message: 'Server error.', error: error.message });
   }
 });
@@ -261,9 +323,10 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
     }
 
     const shareToken = crypto.randomBytes(32).toString('hex');
+    const normalizeOrigin = (origin) => origin?.replace(/\/$/, '');
     const shareLink = recipient
-      ? `${process.env.CLIENT_URI}/share/${file._id}/${shareToken}`
-      : `${process.env.CLIENT_URI}/public/share/${file._id}/${shareToken}`;
+      ? `${normalizeOrigin(process.env.CLIENT_URI)}/share/${file._id}/${shareToken}`
+      : `${normalizeOrigin(process.env.CLIENT_URI)}/public/share/${file._id}/${shareToken}`;
 
     const shareEntry = {
       userId: recipient ? recipient._id : null,
@@ -295,6 +358,7 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
       message: error.message,
       cause: error.cause?.message,
       stack: error.stack,
+      fileId: req.params.fileId,
     });
     res.status(500).json({ message: 'Server error.', error: error.message });
   }
@@ -303,14 +367,22 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
 // Access shared file (authenticated users)
 router.get('/share/:fileId/:token', authMiddleware, async (req, res) => {
   try {
+    console.log('Authenticated share access attempt:', {
+      fileId: req.params.fileId,
+      token: req.params.token,
+      userId: req.user.id,
+    });
     if (!mongoose.Types.ObjectId.isValid(req.params.fileId)) {
+      console.log('Invalid file ID:', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'Invalid file ID.' });
     }
     const file = await File.findById(req.params.fileId);
     if (!file || file.shareToken !== req.params.token) {
+      console.log('Invalid share link:', { fileId: req.params.fileId, token: req.params.token });
       return res.status(404).json({ message: 'Invalid share link.' });
     }
     if (!file.sharedWith.some((share) => share.userId?.toString() === req.user.id)) {
+      console.log('Unauthorized access:', { fileId: req.params.fileId, userId: req.user.id });
       return res.status(403).json({ message: 'Unauthorized access.' });
     }
     res.status(200).json({
@@ -321,7 +393,12 @@ router.get('/share/:fileId/:token', authMiddleware, async (req, res) => {
       sharedWith: file.sharedWith,
     });
   } catch (error) {
-    console.error('Share access error:', error);
+    console.error('Share access error:', {
+      message: error.message,
+      stack: error.stack,
+      fileId: req.params.fileId,
+      token: req.params.token,
+    });
     res.status(500).json({ message: 'Server error.', error: error.message });
   }
 });
@@ -329,11 +406,23 @@ router.get('/share/:fileId/:token', authMiddleware, async (req, res) => {
 // Access shared file (public)
 router.get('/public/share/:fileId/:token', async (req, res) => {
   try {
+    console.log('Public share access attempt:', {
+      fileId: req.params.fileId,
+      token: req.params.token,
+      origin: req.get('Origin'),
+    });
     if (!mongoose.Types.ObjectId.isValid(req.params.fileId)) {
+      console.log('Invalid file ID:', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'Invalid file ID.' });
     }
     const file = await File.findById(req.params.fileId);
-    if (!file || !file.sharedWith.some((share) => share.publicToken === req.params.token)) {
+    if (!file) {
+      console.log('File not found:', { fileId: req.params.fileId });
+      return res.status(404).json({ message: 'File not found.' });
+    }
+    const shareEntry = file.sharedWith.find((share) => share.publicToken === req.params.token);
+    if (!shareEntry) {
+      console.log('Invalid share token:', { fileId: req.params.fileId, token: req.params.token });
       return res.status(404).json({ message: 'Invalid share link.' });
     }
     res.status(200).json({
@@ -341,10 +430,15 @@ router.get('/public/share/:fileId/:token', async (req, res) => {
       filename: file.filename,
       size: file.size,
       iv: file.iv,
-      sharedWith: file.sharedWith.filter((share) => share.publicToken === req.params.token),
+      sharedWith: [shareEntry],
     });
   } catch (error) {
-    console.error('Public share access error:', error);
+    console.error('Public share access error:', {
+      message: error.message,
+      stack: error.stack,
+      fileId: req.params.fileId,
+      token: req.params.token,
+    });
     res.status(500).json({ message: 'Server error.', error: error.message });
   }
 });
@@ -352,23 +446,45 @@ router.get('/public/share/:fileId/:token', async (req, res) => {
 // Download file (public)
 router.get('/public/download/:fileId/:token', async (req, res) => {
   try {
+    console.log('Public download attempt:', {
+      fileId: req.params.fileId,
+      token: req.params.token,
+      origin: req.get('Origin'),
+    });
     if (!mongoose.Types.ObjectId.isValid(req.params.fileId)) {
+      console.log('Invalid file ID:', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'Invalid file ID.' });
     }
     const file = await File.findById(req.params.fileId);
-    if (!file || !file.sharedWith.some((share) => share.publicToken === req.params.token)) {
+    if (!file) {
+      console.log('File not found:', { fileId: req.params.fileId });
+      return res.status(404).json({ message: 'File not found.' });
+    }
+    const shareEntry = file.sharedWith.find((share) => share.publicToken === req.params.token);
+    if (!shareEntry) {
+      console.log('Invalid share token:', { fileId: req.params.fileId, token: req.params.token });
       return res.status(404).json({ message: 'Invalid share link.' });
     }
-    const safePath = path.resolve(file.path);
-    const uploadDirPath = path.resolve(process.env.UPLOAD_DIR || './Uploads');
-    if (!safePath.startsWith(uploadDirPath)) {
-      return res.status(403).json({ message: 'Invalid file path.' });
-    }
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
-    res.sendFile(safePath);
+    const downloadStream = gfs.openDownloadStream(file.gridfsFileId);
+    let fileData = [];
+    downloadStream.on('data', (chunk) => fileData.push(chunk));
+    downloadStream.on('error', (error) => {
+      console.error('Download stream error:', { fileId: req.params.fileId, error: error.message });
+      res.status(404).json({ message: 'File not found in storage.' });
+    });
+    downloadStream.on('end', () => {
+      const buffer = Buffer.concat(fileData);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', `attachment; filename="${file.filename}"`);
+      res.send(buffer);
+    });
   } catch (error) {
-    console.error('Public download error:', error);
+    console.error('Public download error:', {
+      message: error.message,
+      stack: error.stack,
+      fileId: req.params.fileId,
+      token: req.params.token,
+    });
     res.status(500).json({ message: 'Server error.', error: error.message });
   }
 });
@@ -378,11 +494,16 @@ router.delete('/revoke/:fileId/:recipientId', authMiddleware, async (req, res) =
   try {
     const recipientId = req.params.recipientId;
     if (!mongoose.Types.ObjectId.isValid(req.params.fileId)) {
+      console.log('Invalid file ID:', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'Invalid file ID.' });
     }
     const file = await File.findById(req.params.fileId);
-    if (!file) return res.status(404).json({ message: 'File not found.' });
+    if (!file) {
+      console.log('File not found:', { fileId: req.params.fileId });
+      return res.status(404).json({ message: 'File not found.' });
+    }
     if (file.userId.toString() !== req.user.id) {
+      console.log('Unauthorized access:', { fileId: req.params.fileId, userId: req.user.id });
       return res.status(403).json({ message: 'Unauthorized access.' });
     }
 
@@ -401,7 +522,11 @@ router.delete('/revoke/:fileId/:recipientId', authMiddleware, async (req, res) =
     console.log('Access revoked:', { fileId: file._id });
     res.status(200).json({ message: 'Access revoked successfully.' });
   } catch (error) {
-    console.error('Revoke error:', error);
+    console.error('Revoke error:', {
+      message: error.message,
+      stack: error.stack,
+      fileId: req.params.fileId,
+    });
     res.status(500).json({ message: 'Server error.', error: error.message });
   }
 });
