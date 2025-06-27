@@ -275,11 +275,11 @@ router.delete('/delete/:fileId', authMiddleware, async (req, res) => {
       console.log('Unauthorized access:', { fileId: req.params.fileId, userId: req.user.id });
       return res.status(403).json({ message: 'Unauthorized access.' });
     }
-    if (!file.gridfsFileId) {
-      console.log('Missing gridfsFileId, removing metadata only:', { fileId: req.params.fileId });
-    } else {
+    if (file.gridfsFileId) {
       await gfs.delete(file.gridfsFileId);
       console.log('File removed from GridFS:', { fileId: req.params.fileId, gridfsFileId: file.gridfsFileId });
+    } else {
+      console.log('Missing gridfsFileId, removing metadata only:', { fileId: req.params.fileId });
     }
     await File.deleteOne({ _id: req.params.fileId });
     console.log('File metadata deleted:', { fileId: req.params.fileId });
@@ -301,6 +301,10 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
     if (!mongoose.Types.ObjectId.isValid(req.params.fileId)) {
       console.log('Share failed: Invalid file ID', { fileId: req.params.fileId });
       return res.status(400).json({ message: 'Invalid file ID.' });
+    }
+    if (!decryptionKey) {
+      console.log('Share failed: Decryption key required', { fileId: req.params.fileId });
+      return res.status(400).json({ message: 'Decryption key required.' });
     }
     const file = await File.findById(req.params.fileId);
     if (!file) {
@@ -341,7 +345,7 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
         iterations: 100000,
         hash: 'SHA-256',
       },
-      await crypto.subtle.importKey('raw', Buffer.from(decryptionKey), 'PBKDF2', false, ['deriveKey']),
+      await crypto.subtle.importKey('raw', Buffer.from(decryptionKey, 'utf8'), 'PBKDF2', false, ['deriveKey']),
       { name: 'AES-GCM', length: 256 },
       false,
       ['encrypt']
@@ -379,7 +383,7 @@ router.post('/share-link/:fileId', authMiddleware, async (req, res) => {
     file.shareToken = shareToken;
     await file.save();
 
-    if (recipientEmail) {
+    if (recipientEmail && recipient) {
       await transporter.sendMail({
         from: process.env.EMAIL_USER,
         to: recipientEmail,
@@ -418,7 +422,8 @@ router.get('/share/:fileId/:token', authMiddleware, async (req, res) => {
       console.log('Invalid share link:', { fileId: req.params.fileId, token: req.params.token });
       return res.status(404).json({ message: 'Invalid share link.' });
     }
-    if (!file.sharedWith.some((share) => share.userId?.toString() === req.user.id)) {
+    const shareEntry = file.sharedWith.find((share) => share.userId?.toString() === req.user.id);
+    if (!shareEntry) {
       console.log('Unauthorized access:', { fileId: req.params.fileId, userId: req.user.id });
       return res.status(403).json({ message: 'Unauthorized access.' });
     }
@@ -427,7 +432,7 @@ router.get('/share/:fileId/:token', authMiddleware, async (req, res) => {
       filename: file.filename,
       size: file.size,
       iv: file.iv,
-      sharedWith: file.sharedWith,
+      sharedWith: [shareEntry],
     });
   } catch (error) {
     console.error('Share access error:', {
