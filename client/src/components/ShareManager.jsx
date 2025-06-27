@@ -122,7 +122,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     for (let i = 0; i < 16; i++) {
       key += chars.charAt(Math.floor(Math.random() * chars.length));
     }
-    console.log('Generated decryption key:', { key: key.slice(0, 4) + '...' });
+    console.log('Generated decryption key:', { key });
     return key;
   };
 
@@ -187,7 +187,11 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           passwordKey,
           encryptedKeyBuffer
         );
-        console.log('AES key decrypted', { fileId: filename._id, aesKeyLength: new Uint8Array(aesKeyData).length });
+        console.log('AES key decrypted', {
+          fileId: filename._id,
+          aesKeyLength: new Uint8Array(aesKeyData).length,
+          aesKeyBase64: btoa(String.fromCharCode(...new Uint8Array(aesKeyData)))
+        });
       } catch (e) {
         throw new Error(`Failed to decrypt AES key: ${e.message || 'Invalid decryption key or corrupted encrypted key.'}`);
       }
@@ -259,7 +263,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
     }
   };
 
-  const downloadReceivedFile = useCallback(debounce(async (fileId, filename, encryptedKey, salt, iv, retry = false) => {
+  const downloadReceivedFile = useCallback(debounce(async (fileId, filename, encryptedKey, salt, iv, fileIv, retry = false) => {
     if (isDownloading) {
       console.log('Download already in progress:', { fileId, filename });
       addToast({
@@ -282,7 +286,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         encryptedKey: encryptedKey?.slice(0, 10) + '...',
         salt: salt?.slice(0, 10) + '...',
         iv: iv?.slice(0, 10) + '...',
-        fileIv: iv?.slice(0, 10) + '...',
+        fileIv: fileIv?.slice(0, 10) + '...',
         decryptionKey: inputDecryptionKey?.slice(0, 10) + '...',
       });
 
@@ -304,7 +308,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         encryptedKey,
         salt,
         iv,
-        { filename, iv, _id: fileId },
+        { filename, iv: fileIv, _id: fileId },
         inputDecryptionKey
       );
       FileSaver.saveAs(decryptedBlob, filename);
@@ -344,7 +348,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
           type: 'info',
           clearPrevious: true,
         });
-        setTimeout(() => downloadReceivedFile(fileId, filename, encryptedKey, salt, iv, true), 2000);
+        setTimeout(() => downloadReceivedFile(fileId, filename, encryptedKey, salt, iv, fileIv, true), 2000);
       }
     } finally {
       setIsDownloading(false);
@@ -735,7 +739,7 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
                     </div>
                   </div>
                   <button
-                    onClick={() => downloadReceivedFile(file._id, file.filename, userShare.encryptedKey, userShare.salt, userShare.iv)}
+                    onClick={() => downloadReceivedFile(file._id, file.filename, userShare.encryptedKey, userShare.salt, userShare.iv, file.iv)}
                     disabled={isDownloading}
                     className="text-blue-600 hover:text-blue-800 flex items-center disabled:opacity-50"
                   >
