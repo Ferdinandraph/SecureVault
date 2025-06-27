@@ -120,11 +120,36 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
 
   const decryptFile = async (encryptedData, encryptedKey, salt, iv, filename, decryptionKey) => {
     try {
+      // Validate inputs
+      if (!encryptedData || !encryptedKey || !salt || !iv || !filename?.filename || !filename?.iv || !decryptionKey) {
+        throw new Error('Missing required decryption parameters');
+      }
       console.log('Decrypting file:', { filename: filename.filename, fileId: filename._id });
+      
+      // Validate base64 strings
+      try {
+        atob(encryptedKey);
+        atob(salt);
+        atob(iv);
+        atob(filename.iv);
+      } catch (e) {
+        throw new Error(`Invalid base64 encoding: ${e.message}`);
+      }
+
+      const saltBuffer = Uint8Array.from(atob(salt), (c) => c.charCodeAt(0));
+      const ivBuffer = Uint8Array.from(atob(iv), (c) => c.charCodeAt(0));
+      const fileIvBuffer = Uint8Array.from(atob(filename.iv), (c) => c.charCodeAt(0));
+      const encryptedKeyBuffer = Uint8Array.from(atob(encryptedKey), (c) => c.charCodeAt(0));
+
+      // Validate buffer lengths
+      if (saltBuffer.length !== 16) throw new Error(`Invalid salt length: expected 16, got ${saltBuffer.length}`);
+      if (ivBuffer.length !== 12) throw new Error(`Invalid IV length: expected 12, got ${ivBuffer.length}`);
+      if (fileIvBuffer.length !== 12) throw new Error(`Invalid file IV length: expected 12, got ${fileIvBuffer.length}`);
+
       const passwordKey = await crypto.subtle.deriveKey(
         {
           name: 'PBKDF2',
-          salt: Uint8Array.from(atob(salt), (c) => c.charCodeAt(0)),
+          salt: saltBuffer,
           iterations: 100000,
           hash: 'SHA-256',
         },
@@ -133,11 +158,18 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         false,
         ['decrypt']
       );
-      const aesKeyData = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: Uint8Array.from(atob(iv), (c) => c.charCodeAt(0)) },
-        passwordKey,
-        Uint8Array.from(atob(encryptedKey), (c) => c.charCodeAt(0))
-      );
+      
+      let aesKeyData;
+      try {
+        aesKeyData = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: ivBuffer },
+          passwordKey,
+          encryptedKeyBuffer
+        );
+      } catch (e) {
+        throw new Error(`Failed to decrypt AES key: ${e.message}`);
+      }
+
       const cryptoKey = await crypto.subtle.importKey(
         'raw',
         aesKeyData,
@@ -145,13 +177,19 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         false,
         ['decrypt']
       );
-      const fileIv = Uint8Array.from(atob(filename.iv), (c) => c.charCodeAt(0));
+
       const dataBuffer = encryptedData instanceof Blob ? await encryptedData.arrayBuffer() : encryptedData;
-      const decryptedData = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: fileIv },
-        cryptoKey,
-        dataBuffer
-      );
+      let decryptedData;
+      try {
+        decryptedData = await crypto.subtle.decrypt(
+          { name: 'AES-GCM', iv: fileIvBuffer },
+          cryptoKey,
+          dataBuffer
+        );
+      } catch (e) {
+        throw new Error(`Failed to decrypt file data: ${e.message}`);
+      }
+
       const extension = filename.filename.split('.').pop().toLowerCase();
       const mimeTypes = {
         pdf: 'application/pdf',
@@ -165,11 +203,86 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
       return new Blob([decryptedData], { type: mimeType });
     } catch (error) {
       console.error('Decrypt file error:', {
-        filename: filename.filename,
-        fileId: filename._id,
+        filename: filename?.filename,
+        fileId: filename?._id,
         message: error.message,
+        name: error.name,
+        stack: error.stack,
+        encryptedKeyLength: encryptedKey?.length,
+        saltLength: salt?.length,
+        ivLength: iv?.length,
+        fileIvLength: filename?.iv?.length,
+        decryptionKeyLength: decryptionKey?.length,
       });
-      throw new Error('Decryption failed: Invalid key or corrupted data.');
+      throw new Error(`Decryption failed: ${error.message || 'Invalid key or corrupted data.'}`);
+    }
+  };
+
+  const downloadReceivedFile = async (fileId, filename, encryptedKey, salt, iv, retry = false) => {
+    try {
+      const inputDecryptionKey = prompt('Enter the decryption key provided by the sender:');
+      if (!inputDecryptionKey) {
+        addToast({ title: 'Error', description: 'Decryption key is required.', type: 'error' });
+        return;
+      }
+      console.log('downloadReceivedFile inputs:', {
+        fileId,
+        filename,
+        encryptedKey: encryptedKey?.slice(0, 10) + '...',
+        salt: salt?.slice(0, 10) + '...',
+        iv: iv?.slice(0, 10) + '...',
+        decryptionKey: inputDecryptionKey?.slice(0, 10) + '...',
+      });
+      const token = localStorage.getItem('token');
+      if (!token) {
+        throw new Error('Authentication token missing');
+      }
+      console.log('Downloading received file:', { fileId, filename });
+      const response = await axios.get(`${import.meta.env.VITE_BACKEND_URI}/api/files/download/${fileId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+        responseType: 'blob',
+      });
+      if (!(response.data instanceof Blob)) {
+        throw new Error('Invalid response data: Expected Blob');
+      }
+      const decryptedBlob = await decryptFile(response.data, encryptedKey, salt, iv, { filename, iv, _id: fileId }, inputDecryptionKey);
+      const url = window.URL.createObjectURL(decryptedBlob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+      console.log('Received file downloaded:', { fileId, filename });
+      addToast({
+        title: 'Download Started',
+        description: `Downloading ${filename}.`,
+        type: 'success',
+      });
+    } catch (error) {
+      console.error('Download received file error:', {
+        fileId,
+        filename,
+        message: error.message,
+        name: error.name,
+        stack: error.stack,
+        status: error.response?.status,
+      });
+      if (!retry && error.response?.status && error.response.status !== 400 && error.response.status !== 404 && error.response.status !== 403) {
+        addToast({
+          title: 'Retrying Download',
+          description: `Retrying download for ${filename} (Attempt 2/2).`,
+          type: 'info',
+        });
+        setTimeout(() => downloadReceivedFile(fileId, filename, encryptedKey, salt, iv, true), 2000);
+      } else {
+        addToast({
+          title: 'Error',
+          description: error.message || 'Failed to download or decrypt file. Check the decryption key.',
+          type: 'error',
+        });
+      }
     }
   };
 
@@ -306,58 +419,6 @@ const ShareManager = ({ selectedFile: initialFile, onShareSuccess }) => {
         addToast({
           title: 'Revoke Failed',
           description: error.response?.data?.message || 'Failed to revoke access.',
-          type: 'error',
-        });
-      }
-    }
-  };
-
-  const downloadReceivedFile = async (fileId, filename, encryptedKey, salt, iv, retry = false) => {
-    try {
-      const inputDecryptionKey = prompt('Enter the decryption key provided by the sender:');
-      if (!inputDecryptionKey) {
-        addToast({ title: 'Error', description: 'Decryption key is required.', type: 'error' });
-        return;
-      }
-      const token = localStorage.getItem('token');
-      console.log('Downloading received file:', { fileId, filename });
-      const response = await axios.get(`${import.meta.env.VITE_BACKEND_URI}/api/files/download/${fileId}`, {
-        headers: { Authorization: `Bearer ${token}` },
-        responseType: 'blob',
-      });
-      const decryptedBlob = await decryptFile(response.data, encryptedKey, salt, iv, { filename, iv, _id: fileId }, inputDecryptionKey);
-      const url = window.URL.createObjectURL(decryptedBlob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      window.URL.revokeObjectURL(url);
-      console.log('Received file downloaded:', { fileId, filename });
-      addToast({
-        title: 'Download Started',
-        description: `Downloading ${filename}.`,
-        type: 'success',
-      });
-    } catch (error) {
-      console.error('Download received file error:', {
-        fileId,
-        filename,
-        message: error.message,
-        status: error.response?.status,
-      });
-      if (!retry && error.response?.status !== 400 && error.response?.status !== 404 && error.response?.status !== 403) {
-        addToast({
-          title: 'Retrying Download',
-          description: `Retrying download for ${filename} (Attempt 2/2).`,
-          type: 'info',
-        });
-        setTimeout(() => downloadReceivedFile(fileId, filename, encryptedKey, salt, iv, true), 2000);
-      } else {
-        addToast({
-          title: 'Error',
-          description: error.message || 'Failed to download or decrypt file. Check the decryption key.',
           type: 'error',
         });
       }
