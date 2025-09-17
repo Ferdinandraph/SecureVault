@@ -30,11 +30,6 @@ const Dashboard = () => {
       console.log('Stats fetched:', response.data);
     } catch (error) {
       console.error('Fetch stats error:', error.response?.data || error.message);
-      addToast({
-        title: 'Error',
-        description: error.response?.data?.message || 'Failed to fetch stats.',
-        type: 'error',
-      });
       if (error.response?.status === 401 || error.response?.status === 404) {
         logout();
         navigate('/login');
