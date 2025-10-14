@@ -2,7 +2,6 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
-const Resend = require('resend');
 const crypto = require('crypto');
 const User = require('../models/User');
 const TempUser = require('../models/TempUser');
@@ -52,13 +51,15 @@ if (EMAIL_PROVIDER === 'nodemailer') {
   });
 }
 
-// Resend setup for production
+// Resend setup for production)
 if (EMAIL_PROVIDER === 'resend') {
   if (!process.env.RESEND_API_KEY) {
     console.error('Error: RESEND_API_KEY required for Resend');
     process.exit(1);
   }
   
+  // Fix: Use default import for newer Resend versions
+  const { Resend } = require('resend');
   resendClient = new Resend(process.env.RESEND_API_KEY);
   console.log('✅ Resend client initialized for production');
 }
