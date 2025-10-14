@@ -15,19 +15,26 @@ if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || !process.env.JWT_SECRE
   process.exit(1);
 }
 
-// Email setup
+//email function setup
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false,
+  requireTLS: true,
   auth: {
     user: process.env.EMAIL_USER,
     pass: process.env.EMAIL_PASS,
   },
+  tls: {
+    rejectUnauthorized: false
+  },
 });
 
-// Verify transporter configuration
+// Test email configuration on startup
 transporter.verify((error, success) => {
   if (error) {
-    console.error('SMTP configuration error:', error);
+    console.error('SMTP configuration failed:', error);
+    // Don't exit, just log and continue - emails will fail gracefully
   } else {
     console.log('SMTP server ready');
   }
@@ -36,39 +43,56 @@ transporter.verify((error, success) => {
 // Register: Send OTP
 router.post('/register', async (req, res) => {
   const { email, username, password, publicKey, encryptedPrivateKey } = req.body;
+  
   try {
-    console.log('Register attempt:', { email, username, passwordLength: password.length });
+    console.log('Register attempt:', { email, username, passwordLength: password?.length || 0 });
+    
+    // Validation
     if (!email || !username || !password || !publicKey || !encryptedPrivateKey) {
       return res.status(400).json({ message: 'All fields are required.' });
     }
+
     const emailRegex = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ message: 'Invalid email format.' });
     }
+    
     if (password.length < 8) {
       return res.status(400).json({ message: 'Password must be at least 8 characters.' });
     }
+
+    // Validate public key
     let publicKeyBuffer;
     try {
       publicKeyBuffer = Buffer.from(publicKey, 'base64');
     } catch (e) {
-      console.log('Invalid public key encoding', { email, error: e.message });
       return res.status(400).json({ message: 'Invalid public key encoding.' });
     }
+    
     if (publicKeyBuffer.length < 256 || publicKeyBuffer.length > 300) {
-      console.log('Invalid public key size', { email, length: publicKeyBuffer.length });
       return res.status(400).json({ message: `Invalid public key size: got ${publicKeyBuffer.length} bytes.` });
     }
+
+    // Check for existing users (both User and TempUser)
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
     const existingTempUser = await TempUser.findOne({ $or: [{ email }, { username }] });
+    
     if (existingUser || existingTempUser) {
-      return res.status(400).json({ message: 'Email or username already taken.' });
+      // Clean up any stale TempUser that might exist
+      if (existingTempUser && existingTempUser.otpExpires < new Date(Date.now() - 24 * 60 * 60 * 1000)) {
+        await TempUser.deleteOne({ _id: existingTempUser._id });
+        console.log('Cleaned up stale TempUser:', email);
+      } else {
+        return res.status(400).json({ message: 'Email or username already taken.' });
+      }
     }
+
+    // Generate OTP
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password.trim(), salt);
-    console.log('Hashed password for TempUser:', { email, hashedPassword });
 
+    // Create TempUser FIRST
     const tempUser = new TempUser({
       email,
       username,
@@ -76,27 +100,63 @@ router.post('/register', async (req, res) => {
       publicKey,
       encryptedPrivateKey,
       otp,
-      otpExpires: new Date(Date.now() + 10 * 60 * 1000),
+      otpExpires: new Date(Date.now() + 10 * 60 * 1000), // 10 minutes
     });
+    
     await tempUser.save();
     console.log('TempUser saved:', { email, otp });
 
-    console.log('Sending OTP email to:', email, 'OTP:', otp);
-    await transporter.sendMail({
-      from: `"SecureVault" <${process.env.EMAIL_USER}>`,
-      to: email,
-      subject: 'SecureVault Registration OTP',
-      text: `Your OTP for SecureVault registration is: ${otp}. It expires in 10 minutes.`,
-    });
+    // Send OTP with timeout and proper error handling
+    let otpSent = false;
+    try {
+      console.log('Attempting to send OTP to:', email);
+      
+      const mailOptions = {
+        from: `"SecureVault" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: 'SecureVault Registration OTP',
+        text: `Your OTP for SecureVault registration is: ${otp}. It expires in 10 minutes.`,
+        timeout: 30000 // 30 second timeout
+      };
 
+      await transporter.sendMail(mailOptions);
+      otpSent = true;
+      console.log('OTP email sent successfully to:', email);
+      
+    } catch (emailError) {
+      console.error('Failed to send OTP email:', {
+        email,
+        error: emailError.message,
+        code: emailError.code
+      });
+      
+      // Clean up TempUser if email fails
+      await TempUser.deleteOne({ email });
+      
+      // Return specific error for email failure
+      return res.status(500).json({ 
+        message: 'Failed to send OTP. Please try again or check your email provider settings.' 
+      });
+    }
+
+    // Only reach here if email was sent successfully
     res.status(200).json({ message: 'OTP sent to your email.' });
+    
   } catch (error) {
     console.error('Register error:', {
       message: error.message,
       stack: error.stack,
       email,
     });
-    res.status(500).json({ message: 'Server error.', error: error.message });
+    
+    // Clean up any partially created TempUser
+    if (email) {
+      await TempUser.deleteOne({ email }).catch(cleanupErr => {
+        console.error('Cleanup error:', cleanupErr);
+      });
+    }
+    
+    res.status(500).json({ message: 'Server error during registration.' });
   }
 });
 
