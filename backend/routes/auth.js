@@ -16,10 +16,10 @@ if (!process.env.JWT_SECRET) {
 }
 
 // Email provider configuration
-const EMAIL_PROVIDER = process.env.EMAIL_PROVIDER || 'nodemailer'; // 'nodemailer' or 'resend'
+const EMAIL_PROVIDER = process.env.EMAIL_PROVIDER || 'nodemailer'; // 'nodemailer' or 'brevo'
 console.log(`📧 Using email provider: ${EMAIL_PROVIDER}`);
 
-let transporter, resendClient;
+let transporter;
 
 // Nodemailer setup for local development (Gmail)
 if (EMAIL_PROVIDER === 'nodemailer') {
@@ -28,7 +28,7 @@ if (EMAIL_PROVIDER === 'nodemailer') {
     process.exit(1);
   }
 
-  transporter = nodemailer.createTransport({
+  transporter = nodemailer.createTransporter({
     host: 'smtp.gmail.com',
     port: 587,
     secure: false,
@@ -51,45 +51,69 @@ if (EMAIL_PROVIDER === 'nodemailer') {
   });
 }
 
-// Resend setup for production)
-if (EMAIL_PROVIDER === 'resend') {
-  if (!process.env.RESEND_API_KEY) {
-    console.error('Error: RESEND_API_KEY required for Resend');
+// Brevo setup validation (no client init needed, create dynamically)
+if (EMAIL_PROVIDER === 'brevo') {
+  if (!process.env.BREVO_API_KEY) {
+    console.error('Error: BREVO_API_KEY required for Brevo');
     process.exit(1);
   }
-  
-  // Fix: Use default import for newer Resend versions
-  const { Resend } = require('resend');
-  resendClient = new Resend(process.env.RESEND_API_KEY);
-  console.log('✅ Resend client initialized for production');
+  if (!process.env.BREVO_SENDER_EMAIL) {
+    console.error('Error: BREVO_SENDER_EMAIL required for Brevo');
+    process.exit(1);
+  }
+  console.log('✅ Brevo configuration validated');
 }
 
-// Send OTP function - handles both providers
+// Send OTP function - handles nodemailer and brevo
 const sendOTP = async (email, otp) => {
   try {
-    if (EMAIL_PROVIDER === 'resend') {
-      // Production: Use Resend
-      console.log('📤 Sending OTP via Resend to:', email);
+    if (EMAIL_PROVIDER === 'brevo') {
+      // Production: Use Brevo
+      console.log('📤 Sending OTP via Brevo to:', email);
       
-      const { data, error } = await resendClient.emails.send({
-        from: process.env.RESEND_FROM_EMAIL || 'SecureVault <noreply@yourdomain.com>',
-        to: [email],
+      const brevo = require('@getbrevo/brevo');
+      const client = new brevo.TransactionalEmailsApi();
+      client.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, process.env.BREVO_API_KEY);
+      
+      const sendSmtpEmail = {
+        sender: {
+          name: 'SecureVault',
+          email: process.env.BREVO_SENDER_EMAIL
+        },
+        to: [{ email }],
         subject: 'SecureVault Registration OTP',
-        text: `Your OTP for SecureVault registration is: ${otp}. It expires in 10 minutes.`,
-        html: `
-          <h2>SecureVault Registration</h2>
-          <p>Your OTP is: <strong>${otp}</strong></p>
-          <p>This OTP expires in 10 minutes.</p>
-          <p>If you didn't request this, please ignore this email.</p>
+        htmlContent: `
+          <html>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+              <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
+                <h2 style="color: #2563eb;">Welcome to SecureVault!</h2>
+                <p>Your verification code is:</p>
+                <div style="background: #2563eb; color: white; padding: 20px; text-align: center; border-radius: 8px; font-size: 32px; font-weight: bold; letter-spacing: 8px; margin: 20px 0;">
+                  ${otp}
+                </div>
+                <p>This code expires in <strong>10 minutes</strong>.</p>
+                <p style="color: #666; font-size: 14px;">
+                  If you didn't request this, please ignore this email.
+                </p>
+                <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+                <p style="color: #999; font-size: 12px;">
+                  © 2025 SecureVault. All rights reserved.
+                </p>
+              </div>
+            </body>
+          </html>
         `,
-      });
+        textContent: `Your SecureVault OTP is: ${otp}. It expires in 10 minutes.`
+      };
 
-      if (error) {
-        throw new Error(`Resend error: ${error.message}`);
-      }
+      const result = await client.sendTransacEmail(sendSmtpEmail);
       
-      console.log('✅ Resend OTP sent successfully');
-      return true;
+      if (result && result.messageId) {
+        console.log('✅ Brevo OTP sent successfully:', result.messageId);
+        return true;
+      } else {
+        throw new Error('Brevo response invalid');
+      }
     } 
     else if (EMAIL_PROVIDER === 'nodemailer') {
       // Local dev: Use Gmail
@@ -100,6 +124,11 @@ const sendOTP = async (email, otp) => {
         to: email,
         subject: 'SecureVault Registration OTP',
         text: `Your OTP for SecureVault registration is: ${otp}. It expires in 10 minutes.`,
+        html: `
+          <h2>SecureVault Registration</h2>
+          <p>Your OTP is: <strong style="font-size: 24px; color: #2563eb;">${otp}</strong></p>
+          <p>This OTP expires in 10 minutes.</p>
+        `,
         timeout: 30000
       };
 
@@ -108,19 +137,20 @@ const sendOTP = async (email, otp) => {
       return true;
     }
     else {
-      throw new Error('Invalid EMAIL_PROVIDER. Use "nodemailer" or "resend"');
+      throw new Error(`Unsupported EMAIL_PROVIDER: ${EMAIL_PROVIDER}. Use "nodemailer" or "brevo"`);
     }
   } catch (error) {
     console.error('❌ Failed to send OTP:', {
       provider: EMAIL_PROVIDER,
       email,
-      error: error.message
+      error: error.message,
+      response: error.response?.body || error.response
     });
     throw error;
   }
 };
 
-// Register: Send OTP
+// Register: Send OTP (unchanged)
 router.post('/register', async (req, res) => {
   const { email, username, password, publicKey, encryptedPrivateKey } = req.body;
   
@@ -132,7 +162,7 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ message: 'All fields are required.' });
     }
 
-    const emailRegex = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-z-A-Z]{2,}))$/;
+    const emailRegex = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1:3}\.[0-9]{1:3}\.[0-9]{1:3}\.[0-9]{1:3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ message: 'Invalid email format.' });
     }
@@ -153,7 +183,7 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ message: `Invalid public key size: got ${publicKeyBuffer.length} bytes.` });
     }
 
-    // Clean up any existing TempUser first (prevents "email taken" errors)
+    // Clean up any existing TempUser first
     await TempUser.deleteOne({ $or: [{ email }, { username }] }).catch(() => {
       console.log('Cleanup of existing TempUser (if any)');
     });
