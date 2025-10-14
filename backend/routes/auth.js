@@ -2,6 +2,7 @@ const express = require('express');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
+const Resend = require('resend');
 const crypto = require('crypto');
 const User = require('../models/User');
 const TempUser = require('../models/TempUser');
@@ -10,49 +11,127 @@ const router = express.Router();
 require('dotenv').config({ path: './.env' });
 
 // Validate environment variables
-if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS || !process.env.JWT_SECRET) {
-  console.error('Error: EMAIL_USER, EMAIL_PASS, or JWT_SECRET not set in .env');
+if (!process.env.JWT_SECRET) {
+  console.error('Error: JWT_SECRET not set in .env');
   process.exit(1);
 }
 
-//email function setup
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 587,
-  secure: false,
-  requireTLS: true,
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false
-  },
-});
+// Email provider configuration
+const EMAIL_PROVIDER = process.env.EMAIL_PROVIDER || 'nodemailer'; // 'nodemailer' or 'resend'
+console.log(`📧 Using email provider: ${EMAIL_PROVIDER}`);
 
-// Test email configuration on startup
-transporter.verify((error, success) => {
-  if (error) {
-    console.error('SMTP configuration failed:', error);
-    // Don't exit, just log and continue - emails will fail gracefully
-  } else {
-    console.log('SMTP server ready');
+let transporter, resendClient;
+
+// Nodemailer setup for local development (Gmail)
+if (EMAIL_PROVIDER === 'nodemailer') {
+  if (!process.env.EMAIL_USER || !process.env.EMAIL_PASS) {
+    console.error('Error: EMAIL_USER and EMAIL_PASS required for nodemailer');
+    process.exit(1);
   }
-});
+
+  transporter = nodemailer.createTransport({
+    host: 'smtp.gmail.com',
+    port: 587,
+    secure: false,
+    requireTLS: true,
+    auth: {
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+    tls: {
+      rejectUnauthorized: false
+    },
+  });
+
+  transporter.verify((error, success) => {
+    if (error) {
+      console.error('SMTP configuration failed:', error);
+    } else {
+      console.log('✅ SMTP server ready (Gmail for local dev)');
+    }
+  });
+}
+
+// Resend setup for production
+if (EMAIL_PROVIDER === 'resend') {
+  if (!process.env.RESEND_API_KEY) {
+    console.error('Error: RESEND_API_KEY required for Resend');
+    process.exit(1);
+  }
+  
+  resendClient = new Resend(process.env.RESEND_API_KEY);
+  console.log('✅ Resend client initialized for production');
+}
+
+// Send OTP function - handles both providers
+const sendOTP = async (email, otp) => {
+  try {
+    if (EMAIL_PROVIDER === 'resend') {
+      // Production: Use Resend
+      console.log('📤 Sending OTP via Resend to:', email);
+      
+      const { data, error } = await resendClient.emails.send({
+        from: process.env.RESEND_FROM_EMAIL || 'SecureVault <noreply@yourdomain.com>',
+        to: [email],
+        subject: 'SecureVault Registration OTP',
+        text: `Your OTP for SecureVault registration is: ${otp}. It expires in 10 minutes.`,
+        html: `
+          <h2>SecureVault Registration</h2>
+          <p>Your OTP is: <strong>${otp}</strong></p>
+          <p>This OTP expires in 10 minutes.</p>
+          <p>If you didn't request this, please ignore this email.</p>
+        `,
+      });
+
+      if (error) {
+        throw new Error(`Resend error: ${error.message}`);
+      }
+      
+      console.log('✅ Resend OTP sent successfully');
+      return true;
+    } 
+    else if (EMAIL_PROVIDER === 'nodemailer') {
+      // Local dev: Use Gmail
+      console.log('📤 Sending OTP via Gmail to:', email);
+      
+      const mailOptions = {
+        from: `"SecureVault" <${process.env.EMAIL_USER}>`,
+        to: email,
+        subject: 'SecureVault Registration OTP',
+        text: `Your OTP for SecureVault registration is: ${otp}. It expires in 10 minutes.`,
+        timeout: 30000
+      };
+
+      await transporter.sendMail(mailOptions);
+      console.log('✅ Gmail OTP sent successfully');
+      return true;
+    }
+    else {
+      throw new Error('Invalid EMAIL_PROVIDER. Use "nodemailer" or "resend"');
+    }
+  } catch (error) {
+    console.error('❌ Failed to send OTP:', {
+      provider: EMAIL_PROVIDER,
+      email,
+      error: error.message
+    });
+    throw error;
+  }
+};
 
 // Register: Send OTP
 router.post('/register', async (req, res) => {
   const { email, username, password, publicKey, encryptedPrivateKey } = req.body;
   
   try {
-    console.log('Register attempt:', { email, username, passwordLength: password?.length || 0 });
+    console.log('🔐 Register attempt:', { email, username, passwordLength: password?.length || 0 });
     
     // Validation
     if (!email || !username || !password || !publicKey || !encryptedPrivateKey) {
       return res.status(400).json({ message: 'All fields are required.' });
     }
 
-    const emailRegex = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
+    const emailRegex = /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-z-A-Z]{2,}))$/;
     if (!emailRegex.test(email)) {
       return res.status(400).json({ message: 'Invalid email format.' });
     }
@@ -73,26 +152,23 @@ router.post('/register', async (req, res) => {
       return res.status(400).json({ message: `Invalid public key size: got ${publicKeyBuffer.length} bytes.` });
     }
 
-    // Check for existing users (both User and TempUser)
+    // Clean up any existing TempUser first (prevents "email taken" errors)
+    await TempUser.deleteOne({ $or: [{ email }, { username }] }).catch(() => {
+      console.log('Cleanup of existing TempUser (if any)');
+    });
+
+    // Check for existing users
     const existingUser = await User.findOne({ $or: [{ email }, { username }] });
-    const existingTempUser = await TempUser.findOne({ $or: [{ email }, { username }] });
-    
-    if (existingUser || existingTempUser) {
-      // Clean up any stale TempUser that might exist
-      if (existingTempUser && existingTempUser.otpExpires < new Date(Date.now() - 24 * 60 * 60 * 1000)) {
-        await TempUser.deleteOne({ _id: existingTempUser._id });
-        console.log('Cleaned up stale TempUser:', email);
-      } else {
-        return res.status(400).json({ message: 'Email or username already taken.' });
-      }
+    if (existingUser) {
+      return res.status(400).json({ message: 'Email or username already taken.' });
     }
 
-    // Generate OTP
+    // Generate OTP and hash password
     const otp = Math.floor(100000 + Math.random() * 900000).toString();
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password.trim(), salt);
 
-    // Create TempUser FIRST
+    // Create TempUser
     const tempUser = new TempUser({
       email,
       username,
@@ -104,46 +180,34 @@ router.post('/register', async (req, res) => {
     });
     
     await tempUser.save();
-    console.log('TempUser saved:', { email, otp });
+    console.log('✅ TempUser saved:', { email, otp });
 
-    // Send OTP with timeout and proper error handling
+    // Send OTP
     let otpSent = false;
     try {
-      console.log('Attempting to send OTP to:', email);
-      
-      const mailOptions = {
-        from: `"SecureVault" <${process.env.EMAIL_USER}>`,
-        to: email,
-        subject: 'SecureVault Registration OTP',
-        text: `Your OTP for SecureVault registration is: ${otp}. It expires in 10 minutes.`,
-        timeout: 30000 // 30 second timeout
-      };
-
-      await transporter.sendMail(mailOptions);
+      await sendOTP(email, otp);
       otpSent = true;
-      console.log('OTP email sent successfully to:', email);
-      
     } catch (emailError) {
       console.error('Failed to send OTP email:', {
         email,
-        error: emailError.message,
-        code: emailError.code
+        provider: EMAIL_PROVIDER,
+        error: emailError.message
       });
       
       // Clean up TempUser if email fails
       await TempUser.deleteOne({ email });
       
-      // Return specific error for email failure
       return res.status(500).json({ 
-        message: 'Failed to send OTP. Please try again or check your email provider settings.' 
+        message: 'Failed to send OTP. Please try again.' 
       });
     }
 
-    // Only reach here if email was sent successfully
-    res.status(200).json({ message: 'OTP sent to your email.' });
+    if (otpSent) {
+      res.status(200).json({ message: 'OTP sent to your email.' });
+    }
     
   } catch (error) {
-    console.error('Register error:', {
+    console.error('💥 Register error:', {
       message: error.message,
       stack: error.stack,
       email,
@@ -160,14 +224,16 @@ router.post('/register', async (req, res) => {
   }
 });
 
-// Verify OTP
+// Verify OTP (unchanged)
 router.post('/verify-otp', async (req, res) => {
   const { email, otp } = req.body;
   try {
-    console.log('Verify OTP attempt:', { email, otp });
+    console.log('🔍 Verify OTP attempt:', { email, otp });
     if (!email || !otp) return res.status(400).json({ message: 'Email and OTP are required.' });
+    
     const tempUser = await TempUser.findOne({ email });
-    if (!tempUser) return res.status(400).json({ message: 'User not found.' });
+    if (!tempUser) return res.status(400).json({ message: 'No registration found. Please register again.' });
+    
     if (tempUser.otp !== otp || tempUser.otpExpires < Date.now()) {
       await TempUser.deleteOne({ email });
       return res.status(400).json({ message: 'Invalid or expired OTP.' });
@@ -189,11 +255,12 @@ router.post('/verify-otp', async (req, res) => {
       isVerified: true,
     });
     await user.save();
-    console.log('User created:', { email, userId: user._id, hashedPassword: user.password });
+    console.log('✅ User created:', { email, userId: user._id });
     await TempUser.deleteOne({ email });
 
     const token = jwt.sign({ id: user._id.toString(), email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
-    console.log('Token generated for:', { email, userId: user._id });
+    console.log('🔑 Token generated for:', email);
+    
     res.status(200).json({
       token,
       user: { id: user._id, email: user.email, username: user.username, encryptedPrivateKey: user.encryptedPrivateKey },
@@ -204,21 +271,18 @@ router.post('/verify-otp', async (req, res) => {
   }
 });
 
-// Login
+// Login (unchanged)
 router.post('/login', async (req, res) => {
   const { email, password } = req.body;
-  console.log('Login request:', { email, passwordLength: password.length });
+  console.log('🔐 Login request:', { email, passwordLength: password?.length || 0 });
   try {
     if (!email || !password) return res.status(400).json({ message: 'Email and password are required.' });
     const user = await User.findOne({ email });
     if (!user || !user.isVerified) return res.status(400).json({ message: 'Invalid credentials or account not verified.' });
 
-    console.log('Comparing password for:', email, 'Stored hash:', user.password);
     const isMatch = await bcrypt.compare(password.trim(), user.password);
-    console.log('Password match result:', isMatch);
     if (!isMatch) return res.status(400).json({ message: 'Incorrect password.' });
 
-    console.log('Generating JWT for:', email);
     const token = jwt.sign({ id: user._id.toString(), email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
     res.status(200).json({
       token,
@@ -230,7 +294,7 @@ router.post('/login', async (req, res) => {
   }
 });
 
-// Get public key
+// Get public key (unchanged)
 router.get('/public-key/:email', authMiddleware, async (req, res) => {
   try {
     const user = await User.findOne({ email: req.params.email });
@@ -242,17 +306,15 @@ router.get('/public-key/:email', authMiddleware, async (req, res) => {
   }
 });
 
-// Validate email
+// Validate email (unchanged)
 router.post('/validate-email', authMiddleware, async (req, res) => {
   try {
     const { email } = req.body;
     if (!email) return res.status(400).json({ message: 'Email is required.' });
     const user = await User.findOne({ email });
     if (!user) {
-      console.log('Email validation failed:', { email });
       return res.status(404).json({ message: `Email ${email} not registered.` });
     }
-    console.log('Email validation succeeded:', { email });
     res.status(200).json({ message: 'Email is registered.' });
   } catch (error) {
     console.error('Email validation error:', error);
