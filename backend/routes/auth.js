@@ -70,61 +70,47 @@ const sendOTP = async (email, otp) => {
     if (EMAIL_PROVIDER === 'brevo') {
       console.log('📤 Sending OTP via Brevo to:', email);
       
+      // Import and configure Brevo correctly
       const brevo = require('@getbrevo/brevo');
       
-      // Configure API client with correct authentication
-      const client = new brevo.TransactionalEmailsApi();
+      // Create configuration with explicit API key
+      const config = new brevo.Configuration();
+      config.apiKey = {
+        'api-key': process.env.BREVO_API_KEY  // Correct key placement
+      };
       
-      // Method 1: Using apiKey identifier (most common)
-      client.setApiKey(brevo.TransactionalEmailsApiApiKeys.apiKey, process.env.BREVO_API_KEY);
+      const client = new brevo.TransactionalEmailsApi(new config);
       
       const sendSmtpEmail = {
         sender: {
           name: 'SecureVault',
-          email: process.env.BREVO_SENDER_EMAIL  // Must be VERIFIED
+          email: process.env.BREVO_SENDER_EMAIL
         },
         to: [{ email }],
         subject: 'SecureVault Registration OTP',
-        htmlContent: `
-          <html>
-            <body style="font-family: Arial, sans-serif;">
-              <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-                <h2 style="color: #2563eb;">Welcome to SecureVault!</h2>
-                <div style="background: #2563eb; color: white; padding: 20px; text-align: center; border-radius: 8px; font-size: 32px; font-weight: bold; letter-spacing: 8px; margin: 20px 0;">
-                  ${otp}
-                </div>
-                <p>This code expires in 10 minutes.</p>
-              </div>
-            </body>
-          </html>
-        `,
-        textContent: `Your SecureVault OTP is: ${otp}. It expires in 10 minutes.`
+        htmlContent: `<h1 style="text-align:center;font-size:48px">${otp}</h1><p>Expires in 10 minutes</p>`,
+        params: { OTP: otp }  // Template parameter (optional)
       };
 
+      console.log('🔑 Using API key prefix:', process.env.BREVO_API_KEY?.substring(0, 10) + '...');
+      console.log('📧 Sender email:', process.env.BREVO_SENDER_EMAIL);
+      
       const result = await client.sendTransacEmail(sendSmtpEmail);
       
-      console.log('✅ Brevo response:', result.messageId || result);
+      console.log('✅ Brevo SUCCESS:', result.messageId || 'Message sent');
       return true;
       
     } else if (EMAIL_PROVIDER === 'nodemailer') {
-      // Your existing Gmail code...
-      const mailOptions = {
-        from: `"SecureVault" <${process.env.EMAIL_USER}>`,
-        to: email,
-        subject: 'SecureVault Registration OTP',
-        text: `Your OTP: ${otp}`,
-        timeout: 30000
-      };
-      await transporter.sendMail(mailOptions);
-      console.log('✅ Gmail OTP sent');
-      return true;
+      // Your Gmail code...
     }
   } catch (error) {
-    console.error('❌ Brevo detailed error:', {
+    console.error('❌ Brevo FULL ERROR:', {
       status: error.response?.status,
+      statusText: error.response?.statusText,
       message: error.message,
-      body: error.response?.body,
-      apiKeySet: !!process.env.BREVO_API_KEY,
+      body: error.response?.data,
+      headers: error.response?.headers,
+      apiKeyPrefix: process.env.BREVO_API_KEY?.substring(0, 10) + '...',
       senderEmail: process.env.BREVO_SENDER_EMAIL
     });
     throw error;
