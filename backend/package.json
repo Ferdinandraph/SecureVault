@@ -7,7 +7,6 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
-    "@getbrevo/brevo": "^3.0.1",
     "bcrypt": "^5.1.1",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -20,6 +19,7 @@
     "multer": "^2.0.1",
     "nodemailer": "^6.9.15",
     "resend": "^6.1.2",
+    "sib-api-v3-sdk": "^8.5.0",
     "speakeasy": "^2.0.0"
   },
   "devDependencies": {
